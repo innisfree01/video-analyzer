@@ -189,39 +189,53 @@ static void *camera_worker(void *arg)
 
     int fd = cam->stream.fd;
 
-    /* 2. Enumerate formats for diagnostic purposes */
+    /* 2. Enumerate and auto-select the best V4L2 format */
     uvc_stream_enumerate_formats(&cam->stream);
 
-    /* 3. Set V4L2 format — use whatever the device supports.
-     *    Try the device's advertised format to ensure proper USB negotiation.
-     *    The actual encoded data (H.265 etc.) is tunneled inside this format. */
-    {
-        struct v4l2_format cur_fmt;
-        memset(&cur_fmt, 0, sizeof(cur_fmt));
-        cur_fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
-        if (ioctl(fd, VIDIOC_G_FMT, &cur_fmt) == 0) {
-            uvc_stream_set_format(&cam->stream,
-                                  cur_fmt.fmt.pix.pixelformat,
-                                  cur_fmt.fmt.pix.width,
-                                  cur_fmt.fmt.pix.height);
-        }
+    FormatSelection sel;
+    ret = uvc_stream_find_best_format(&cam->stream,
+                                      cam->width, cam->height,
+                                      cam->venc, &sel);
+    if (ret < 0) {
+        fprintf(stderr, "[CAM%d] No compatible format on %s\n",
+                cam->sensor_id, cam->dev_path);
+        uvc_stream_close(&cam->stream);
+        cam->thread_running = 0;
+        return NULL;
     }
 
-    /* 4. Sync NTP time to device */
+    /* Override the XU venc and resolution to match what V4L2 actually supports */
+    uint8_t  actual_venc   = sel.matched_venc;
+    uint16_t actual_width  = (uint16_t)sel.width;
+    uint16_t actual_height = (uint16_t)sel.height;
+
+    if (actual_venc != cam->venc) {
+        fprintf(stdout, "[CAM%d] V4L2 format requires venc=%s (requested %s)\n",
+                cam->sensor_id, venc_to_str(actual_venc), venc_to_str(cam->venc));
+    }
+
+    ret = uvc_stream_set_format(&cam->stream, sel.pixfmt, sel.width, sel.height);
+    if (ret < 0) {
+        fprintf(stderr, "[CAM%d] Failed to set V4L2 format\n", cam->sensor_id);
+        uvc_stream_close(&cam->stream);
+        cam->thread_running = 0;
+        return NULL;
+    }
+
+    /* 3. Sync NTP time to device */
     uvc_set_ntp_time(fd);
 
-    /* 5. Notify device of host status */
+    /* 4. Notify device of host status */
     uvc_set_host_status(fd, HOST_STATUS_CONNECT_INTERNET);
 
-    /* 6. Query device info */
+    /* 5. Query device info */
     char version[64] = {0};
     if (uvc_get_device_info(fd, version, sizeof(version)) == 0) {
         fprintf(stdout, "[CAM%d] Device firmware: %s\n", cam->sensor_id, version);
     }
 
-    /* 7. Start V4L2 streaming FIRST (STREAMON), then open channel via XU.
-     *    The USB streaming endpoint must be active before the device starts
-     *    pushing encoded frames through the bulk pipe. */
+    /* 6. Start V4L2 streaming FIRST, then open XU channel.
+     *    USB streaming endpoint must be active before device pushes data. */
     ret = uvc_stream_start(&cam->stream);
     if (ret < 0) {
         fprintf(stderr, "[CAM%d] Failed to start V4L2 streaming\n", cam->sensor_id);
@@ -230,14 +244,13 @@ static void *camera_worker(void *arg)
         return NULL;
     }
 
-    /* 8. Small delay to let USB streaming settle */
     usleep(200000);
 
-    /* 9. NOW open the video channel via XU command (switch_on=1).
-     *    This tells the device firmware to start encoding and sending frames. */
+    /* 7. Open the video channel via XU (switch_on=1).
+     *    Use the venc that matches the V4L2 format. */
     ret = uvc_open_video_channel(fd, cam->channel,
-                                 cam->width, cam->height,
-                                 cam->venc, cam->fps, cam->bitrate);
+                                 actual_width, actual_height,
+                                 actual_venc, cam->fps, cam->bitrate);
     if (ret < 0) {
         fprintf(stderr, "[CAM%d] Failed to open video channel via XU\n", cam->sensor_id);
         uvc_stream_close(&cam->stream);
@@ -245,14 +258,16 @@ static void *camera_worker(void *arg)
         return NULL;
     }
 
-    fprintf(stdout, "[CAM%d] XU switch_on sent, waiting for frames...\n", cam->sensor_id);
+    fprintf(stdout, "[CAM%d] XU switch_on: ch=%d %dx%d %s, waiting for frames...\n",
+            cam->sensor_id, cam->channel, actual_width, actual_height,
+            venc_to_str(actual_venc));
 
-    /* 10. Open video file for saving */
+    /* 8. Open video file for saving */
     if (cam->save_video) {
         char filepath[512];
         snprintf(filepath, sizeof(filepath), "%s/cam%d_ch%d.%s",
                  cam->output_dir, cam->sensor_id, cam->channel,
-                 venc_to_ext(cam->venc));
+                 venc_to_ext(actual_venc));
         cam->video_fp = fopen(filepath, "wb");
         if (!cam->video_fp) {
             fprintf(stderr, "[CAM%d] Cannot open output file %s: %s\n",
@@ -277,8 +292,8 @@ static void *camera_worker(void *arg)
                 fprintf(stderr, "[CAM%d] Timeout #1 — re-sending XU switch_on...\n",
                         cam->sensor_id);
                 uvc_open_video_channel(fd, cam->channel,
-                                       cam->width, cam->height,
-                                       cam->venc, cam->fps, cam->bitrate);
+                                       actual_width, actual_height,
+                                       actual_venc, cam->fps, cam->bitrate);
             } else if (consecutive_timeouts == 3) {
                 fprintf(stderr, "[CAM%d] Timeout #3 — requesting keyframe...\n",
                         cam->sensor_id);
@@ -288,7 +303,6 @@ static void *camera_worker(void *arg)
                         "Restarting V4L2 stream...\n",
                         cam->sensor_id, consecutive_timeouts);
 
-                /* STREAMOFF + re-request buffers + STREAMON cycle */
                 uvc_stream_stop(&cam->stream);
                 usleep(500000);
 
@@ -301,8 +315,8 @@ static void *camera_worker(void *arg)
 
                 usleep(200000);
                 uvc_open_video_channel(fd, cam->channel,
-                                       cam->width, cam->height,
-                                       cam->venc, cam->fps, cam->bitrate);
+                                       actual_width, actual_height,
+                                       actual_venc, cam->fps, cam->bitrate);
                 consecutive_timeouts = 0;
             }
 

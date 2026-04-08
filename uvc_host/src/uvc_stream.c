@@ -57,10 +57,6 @@ int uvc_stream_open(UvcStream *stream, const char *dev_path)
     LOG_INFO("  driver:       %s", cap.driver);
     LOG_INFO("  card:         %s", cap.card);
     LOG_INFO("  bus_info:     %s", cap.bus_info);
-    LOG_INFO("  version:      %u.%u.%u",
-             (cap.version >> 16) & 0xFF,
-             (cap.version >> 8) & 0xFF,
-             cap.version & 0xFF);
     LOG_INFO("  capabilities: 0x%08X", cap.capabilities);
 
     if (!(cap.capabilities & V4L2_CAP_VIDEO_CAPTURE)) {
@@ -104,7 +100,6 @@ void uvc_stream_enumerate_formats(UvcStream *stream)
                  fmtdesc.description,
                  (fmtdesc.flags & V4L2_FMT_FLAG_COMPRESSED) ? "[compressed]" : "");
 
-        /* Enumerate frame sizes for this format */
         struct v4l2_frmsizeenum frmsize;
         memset(&frmsize, 0, sizeof(frmsize));
         frmsize.pixel_format = fmtdesc.pixelformat;
@@ -114,36 +109,10 @@ void uvc_stream_enumerate_formats(UvcStream *stream)
             if (frmsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
                 LOG_INFO("    Size[%u]: %ux%u", frmsize.index,
                          frmsize.discrete.width, frmsize.discrete.height);
-
-                /* Enumerate frame intervals for this size */
-                struct v4l2_frmivalenum frmival;
-                memset(&frmival, 0, sizeof(frmival));
-                frmival.pixel_format = fmtdesc.pixelformat;
-                frmival.width = frmsize.discrete.width;
-                frmival.height = frmsize.discrete.height;
-                frmival.index = 0;
-
-                while (xioctl(stream->fd, VIDIOC_ENUM_FRAMEINTERVALS, &frmival) == 0) {
-                    if (frmival.type == V4L2_FRMIVAL_TYPE_DISCRETE) {
-                        LOG_INFO("      FPS: %u/%u",
-                                 frmival.discrete.denominator,
-                                 frmival.discrete.numerator);
-                    } else if (frmival.type == V4L2_FRMIVAL_TYPE_STEPWISE ||
-                               frmival.type == V4L2_FRMIVAL_TYPE_CONTINUOUS) {
-                        LOG_INFO("      FPS range: %u/%u - %u/%u",
-                                 frmival.stepwise.min.denominator,
-                                 frmival.stepwise.min.numerator,
-                                 frmival.stepwise.max.denominator,
-                                 frmival.stepwise.max.numerator);
-                    }
-                    frmival.index++;
-                }
-            } else if (frmsize.type == V4L2_FRMSIZE_TYPE_STEPWISE ||
-                       frmsize.type == V4L2_FRMSIZE_TYPE_CONTINUOUS) {
-                LOG_INFO("    Size range: %u-%u x %u-%u (step %u x %u)",
+            } else {
+                LOG_INFO("    Size range: %u-%u x %u-%u",
                          frmsize.stepwise.min_width, frmsize.stepwise.max_width,
-                         frmsize.stepwise.min_height, frmsize.stepwise.max_height,
-                         frmsize.stepwise.step_width, frmsize.stepwise.step_height);
+                         frmsize.stepwise.min_height, frmsize.stepwise.max_height);
             }
             frmsize.index++;
         }
@@ -151,7 +120,6 @@ void uvc_stream_enumerate_formats(UvcStream *stream)
         fmtdesc.index++;
     }
 
-    /* Print current format */
     struct v4l2_format fmt;
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
@@ -159,16 +127,178 @@ void uvc_stream_enumerate_formats(UvcStream *stream)
     if (xioctl(stream->fd, VIDIOC_G_FMT, &fmt) == 0) {
         char fourcc_str[5];
         fourcc_to_str(fmt.fmt.pix.pixelformat, fourcc_str);
-        LOG_INFO("  Current active format:");
-        LOG_INFO("    pixfmt:    '%s' (0x%08X)", fourcc_str, fmt.fmt.pix.pixelformat);
-        LOG_INFO("    size:      %ux%u", fmt.fmt.pix.width, fmt.fmt.pix.height);
-        LOG_INFO("    sizeimage: %u", fmt.fmt.pix.sizeimage);
-        LOG_INFO("    bytesperline: %u", fmt.fmt.pix.bytesperline);
-        LOG_INFO("    field:     %u", fmt.fmt.pix.field);
-        LOG_INFO("    colorspace: %u", fmt.fmt.pix.colorspace);
+        LOG_INFO("  Current format: '%s' %ux%u sizeimage=%u",
+                 fourcc_str, fmt.fmt.pix.width, fmt.fmt.pix.height,
+                 fmt.fmt.pix.sizeimage);
     }
 
     LOG_INFO("=== End format enumeration ===");
+}
+
+/*
+ * Check if a format+size combination is supported by the device.
+ */
+static int format_supports_size(int fd, uint32_t pixfmt,
+                                uint32_t width, uint32_t height)
+{
+    struct v4l2_frmsizeenum frmsize;
+    memset(&frmsize, 0, sizeof(frmsize));
+    frmsize.pixel_format = pixfmt;
+    frmsize.index = 0;
+
+    while (xioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize) == 0) {
+        if (frmsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+            if (frmsize.discrete.width == width &&
+                frmsize.discrete.height == height)
+                return 1;
+        } else {
+            if (width >= frmsize.stepwise.min_width &&
+                width <= frmsize.stepwise.max_width &&
+                height >= frmsize.stepwise.min_height &&
+                height <= frmsize.stepwise.max_height)
+                return 1;
+        }
+        frmsize.index++;
+    }
+    return 0;
+}
+
+/*
+ * Check if a pixel format is supported by the device.
+ */
+static int device_has_format(int fd, uint32_t pixfmt)
+{
+    struct v4l2_fmtdesc fmtdesc;
+    memset(&fmtdesc, 0, sizeof(fmtdesc));
+    fmtdesc.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
+    fmtdesc.index = 0;
+
+    while (xioctl(fd, VIDIOC_ENUM_FMT, &fmtdesc) == 0) {
+        if (fmtdesc.pixelformat == pixfmt)
+            return 1;
+        fmtdesc.index++;
+    }
+    return 0;
+}
+
+/*
+ * Find the largest supported resolution for a given pixel format.
+ */
+static int find_max_resolution(int fd, uint32_t pixfmt,
+                               uint32_t *out_w, uint32_t *out_h)
+{
+    struct v4l2_frmsizeenum frmsize;
+    memset(&frmsize, 0, sizeof(frmsize));
+    frmsize.pixel_format = pixfmt;
+    frmsize.index = 0;
+
+    uint32_t best_w = 0, best_h = 0;
+
+    while (xioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize) == 0) {
+        uint32_t w, h;
+        if (frmsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+            w = frmsize.discrete.width;
+            h = frmsize.discrete.height;
+        } else {
+            w = frmsize.stepwise.max_width;
+            h = frmsize.stepwise.max_height;
+        }
+
+        if ((uint64_t)w * h > (uint64_t)best_w * best_h) {
+            best_w = w;
+            best_h = h;
+        }
+        frmsize.index++;
+    }
+
+    if (best_w > 0) {
+        *out_w = best_w;
+        *out_h = best_h;
+        return 0;
+    }
+    return -1;
+}
+
+#ifndef V4L2_PIX_FMT_H264
+#define V4L2_PIX_FMT_H264  v4l2_fourcc('H', '2', '6', '4')
+#endif
+#ifndef V4L2_PIX_FMT_MJPG
+#define V4L2_PIX_FMT_MJPG  v4l2_fourcc('M', 'J', 'P', 'G')
+#endif
+/* Use local name to avoid conflict with V4L2_PIX_FMT_YUYV from videodev2.h */
+#define LOCAL_PIX_FMT_YUYV  v4l2_fourcc('Y', 'U', 'Y', 'V')
+
+int uvc_stream_find_best_format(UvcStream *stream, uint32_t want_width,
+                                uint32_t want_height, uint8_t want_venc,
+                                FormatSelection *out)
+{
+    int fd = stream->fd;
+    memset(out, 0, sizeof(*out));
+
+    /*
+     * Strategy: match the V4L2 pixel format to the desired XU encoding.
+     *
+     * H.264/H.265 via XU → V4L2 H264 format (H.265 is tunneled through H.264 pipe)
+     * MJPEG via XU        → V4L2 MJPG format
+     * YUV via XU          → V4L2 YUYV format
+     *
+     * If the preferred format isn't available, fall back to the next best option.
+     */
+
+    /* Priority list based on user's requested encoding */
+    struct {
+        uint32_t v4l2_fmt;
+        uint8_t  xu_venc;
+        const char *name;
+    } candidates[4];
+    int n_candidates = 0;
+
+    if (want_venc == UVC_VENC_TYPE_H265 || want_venc == UVC_VENC_TYPE_H264) {
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H264, want_venc, "H264"};
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_MJPG, UVC_VENC_TYPE_MJPEG, "MJPG"};
+        candidates[n_candidates++] = (typeof(candidates[0])){LOCAL_PIX_FMT_YUYV, UVC_VENC_TYPE_YUV, "YUYV"};
+    } else if (want_venc == UVC_VENC_TYPE_MJPEG) {
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_MJPG, UVC_VENC_TYPE_MJPEG, "MJPG"};
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H264, UVC_VENC_TYPE_H264, "H264"};
+        candidates[n_candidates++] = (typeof(candidates[0])){LOCAL_PIX_FMT_YUYV, UVC_VENC_TYPE_YUV, "YUYV"};
+    } else {
+        candidates[n_candidates++] = (typeof(candidates[0])){LOCAL_PIX_FMT_YUYV, UVC_VENC_TYPE_YUV, "YUYV"};
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H264, UVC_VENC_TYPE_H264, "H264"};
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_MJPG, UVC_VENC_TYPE_MJPEG, "MJPG"};
+    }
+
+    for (int i = 0; i < n_candidates; i++) {
+        if (!device_has_format(fd, candidates[i].v4l2_fmt))
+            continue;
+
+        /* Check if desired resolution is supported */
+        if (format_supports_size(fd, candidates[i].v4l2_fmt, want_width, want_height)) {
+            out->pixfmt = candidates[i].v4l2_fmt;
+            out->width = want_width;
+            out->height = want_height;
+            out->matched_venc = candidates[i].xu_venc;
+            LOG_INFO("[%s] Best format: %s %ux%u (xu_venc=%d)",
+                     stream->dev_path, candidates[i].name,
+                     want_width, want_height, candidates[i].xu_venc);
+            return 0;
+        }
+
+        /* Desired resolution not available, use the largest available */
+        uint32_t max_w, max_h;
+        if (find_max_resolution(fd, candidates[i].v4l2_fmt, &max_w, &max_h) == 0) {
+            out->pixfmt = candidates[i].v4l2_fmt;
+            out->width = max_w;
+            out->height = max_h;
+            out->matched_venc = candidates[i].xu_venc;
+            LOG_WARN("[%s] Requested %ux%u not available for %s, using max %ux%u",
+                     stream->dev_path, want_width, want_height,
+                     candidates[i].name, max_w, max_h);
+            return 0;
+        }
+    }
+
+    LOG_ERR("[%s] No suitable format found!", stream->dev_path);
+    return -1;
 }
 
 int uvc_stream_set_format(UvcStream *stream, uint32_t pixfmt,
@@ -178,15 +308,9 @@ int uvc_stream_set_format(UvcStream *stream, uint32_t pixfmt,
     memset(&fmt, 0, sizeof(fmt));
     fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
 
-    /* First read current format */
-    if (xioctl(stream->fd, VIDIOC_G_FMT, &fmt) < 0) {
-        LOG_ERR("VIDIOC_G_FMT failed: %s", strerror(errno));
-        return -1;
-    }
-
     char fourcc_str[5];
     fourcc_to_str(pixfmt, fourcc_str);
-    LOG_INFO("Requesting format: '%s' %ux%u on %s",
+    LOG_INFO("Setting format: '%s' %ux%u on %s",
              fourcc_str, width, height, stream->dev_path);
 
     fmt.fmt.pix.pixelformat = pixfmt;
@@ -195,14 +319,12 @@ int uvc_stream_set_format(UvcStream *stream, uint32_t pixfmt,
     fmt.fmt.pix.field = V4L2_FIELD_NONE;
 
     if (xioctl(stream->fd, VIDIOC_S_FMT, &fmt) < 0) {
-        LOG_WARN("VIDIOC_S_FMT for '%s' %ux%u failed: %s",
-                 fourcc_str, width, height, strerror(errno));
+        LOG_ERR("VIDIOC_S_FMT failed on %s: %s", stream->dev_path, strerror(errno));
 
-        /* Fall back: re-read whatever the device accepted */
         memset(&fmt, 0, sizeof(fmt));
         fmt.type = V4L2_BUF_TYPE_VIDEO_CAPTURE;
         if (xioctl(stream->fd, VIDIOC_G_FMT, &fmt) < 0) {
-            LOG_ERR("VIDIOC_G_FMT failed after S_FMT: %s", strerror(errno));
+            LOG_ERR("VIDIOC_G_FMT failed: %s", strerror(errno));
             return -1;
         }
     }
@@ -213,19 +335,16 @@ int uvc_stream_set_format(UvcStream *stream, uint32_t pixfmt,
     stream->frame_height = fmt.fmt.pix.height;
     stream->sizeimage    = fmt.fmt.pix.sizeimage;
 
-    LOG_INFO("Negotiated format on %s:", stream->dev_path);
-    LOG_INFO("  pixfmt:    '%s' (0x%08X)", fourcc_str, fmt.fmt.pix.pixelformat);
-    LOG_INFO("  size:      %ux%u", fmt.fmt.pix.width, fmt.fmt.pix.height);
-    LOG_INFO("  sizeimage: %u bytes", fmt.fmt.pix.sizeimage);
-    LOG_INFO("  bytesperline: %u", fmt.fmt.pix.bytesperline);
+    LOG_INFO("Active format on %s: '%s' %ux%u sizeimage=%u",
+             stream->dev_path, fourcc_str,
+             fmt.fmt.pix.width, fmt.fmt.pix.height,
+             fmt.fmt.pix.sizeimage);
 
     return 0;
 }
 
 int uvc_stream_start(UvcStream *stream)
 {
-    /* Only request and mmap buffers on the first call.
-     * On restart (after STREAMOFF), just re-queue and STREAMON. */
     if (!stream->buffers_mapped) {
         struct v4l2_requestbuffers req;
         memset(&req, 0, sizeof(req));
@@ -239,12 +358,12 @@ int uvc_stream_start(UvcStream *stream)
         }
 
         if (req.count < 2) {
-            LOG_ERR("Insufficient buffer memory on %s (got %u)", stream->dev_path, req.count);
+            LOG_ERR("Insufficient buffer memory on %s (got %u)",
+                    stream->dev_path, req.count);
             return -1;
         }
 
         stream->n_buffers = req.count;
-        LOG_INFO("Allocated %u V4L2 buffers on %s", stream->n_buffers, stream->dev_path);
 
         for (uint32_t i = 0; i < stream->n_buffers; i++) {
             struct v4l2_buffer buf;
@@ -258,7 +377,7 @@ int uvc_stream_start(UvcStream *stream)
                 return -1;
             }
 
-            LOG_INFO("  Buffer[%u]: length=%u offset=0x%X", i, buf.length, buf.m.offset);
+            LOG_INFO("  Buffer[%u]: length=%u", i, buf.length);
 
             stream->buffers[i].length = buf.length;
             stream->buffers[i].start = mmap(NULL, buf.length,
@@ -273,11 +392,9 @@ int uvc_stream_start(UvcStream *stream)
         }
 
         stream->buffers_mapped = true;
-    } else {
-        LOG_INFO("Re-starting stream on %s (buffers already mapped)", stream->dev_path);
+        LOG_INFO("Mapped %u V4L2 buffers on %s", stream->n_buffers, stream->dev_path);
     }
 
-    /* (Re-)queue all buffers */
     for (uint32_t i = 0; i < stream->n_buffers; i++) {
         struct v4l2_buffer buf;
         memset(&buf, 0, sizeof(buf));
@@ -299,14 +416,10 @@ int uvc_stream_start(UvcStream *stream)
 
     stream->streaming = true;
     stream->reassembly_len = 0;
-    LOG_INFO("V4L2 STREAMON success on %s", stream->dev_path);
+    LOG_INFO("STREAMON on %s", stream->dev_path);
     return 0;
 }
 
-/*
- * Parse DY66-framed data from a raw buffer.
- * The buffer may contain multiple concatenated frames.
- */
 static void parse_frames(UvcStream *stream, const uint8_t *data,
                          uint32_t length, frame_callback_t cb, void *user_data)
 {
@@ -326,7 +439,6 @@ static void parse_frames(UvcStream *stream, const uint8_t *data,
         if (pos + sizeof(UvcFrameHeader_t) > length)
             break;
 
-        /* Look for DY66 magic: 0x44 0x59 0x36 0x36 */
         if (data[pos] != 0x44 || data[pos+1] != 0x59 ||
             data[pos+2] != 0x36 || data[pos+3] != 0x36) {
             pos++;
@@ -344,7 +456,6 @@ static void parse_frames(UvcStream *stream, const uint8_t *data,
         }
 
         if (pos + header.DataLen > length) {
-            /* Incomplete frame, save remainder for reassembly */
             uint32_t remain = length - pos;
             if (remain > stream->reassembly_cap) {
                 stream->reassembly_cap = remain * 2;
@@ -378,9 +489,12 @@ static void parse_frames(UvcStream *stream, const uint8_t *data,
 static void hexdump(const uint8_t *data, uint32_t len, uint32_t max_bytes)
 {
     uint32_t n = (len < max_bytes) ? len : max_bytes;
-    fprintf(stdout, "  HEX[%u bytes]: ", len);
-    for (uint32_t i = 0; i < n; i++)
+    fprintf(stdout, "    ");
+    for (uint32_t i = 0; i < n; i++) {
         fprintf(stdout, "%02X ", data[i]);
+        if ((i + 1) % 16 == 0 && i + 1 < n)
+            fprintf(stdout, "\n    ");
+    }
     if (n < len)
         fprintf(stdout, "...");
     fprintf(stdout, "\n");
@@ -407,8 +521,10 @@ int uvc_stream_read_frame(UvcStream *stream, frame_callback_t cb, void *user_dat
         return -1;
     }
     if (r == 0) {
-        LOG_WARN("select timeout (5s) on %s (total bufs received so far: %lu)",
-                 stream->dev_path, (unsigned long)stream->v4l2_buffers_received);
+        LOG_WARN("select timeout (5s) on %s (bufs=%lu, errors=%lu)",
+                 stream->dev_path,
+                 (unsigned long)stream->v4l2_buffers_received,
+                 (unsigned long)stream->v4l2_error_buffers);
         return -1;
     }
 
@@ -434,14 +550,25 @@ int uvc_stream_read_frame(UvcStream *stream, frame_callback_t cb, void *user_dat
     uint8_t *data = (uint8_t *)stream->buffers[buf.index].start;
     uint32_t length = buf.bytesused;
 
-    /* Log first few buffers for diagnosis */
-    if (stream->v4l2_buffers_received <= 5) {
-        LOG_INFO("[%s] V4L2 buf #%lu: index=%u bytesused=%u flags=0x%X",
-                 stream->dev_path,
-                 (unsigned long)stream->v4l2_buffers_received,
-                 buf.index, length, buf.flags);
-        if (length > 0)
-            hexdump(data, length, 64);
+    /* Check for error flag */
+    if (buf.flags & V4L2_BUF_FLAG_ERROR) {
+        stream->v4l2_error_buffers++;
+        if (stream->v4l2_error_buffers <= 3) {
+            LOG_WARN("[%s] V4L2 buf #%lu: ERROR flag set, bytesused=%u flags=0x%X",
+                     stream->dev_path,
+                     (unsigned long)stream->v4l2_buffers_received,
+                     length, buf.flags);
+        }
+        /* Re-queue and continue */
+        xioctl(stream->fd, VIDIOC_QBUF, &buf);
+        return 0;
+    }
+
+    /* Log first few successful buffers */
+    if (stream->v4l2_buffers_received - stream->v4l2_error_buffers <= 5 && length > 0) {
+        LOG_INFO("[%s] V4L2 buf: bytesused=%u flags=0x%X",
+                 stream->dev_path, length, buf.flags);
+        hexdump(data, length, 64);
     }
 
     if (length > 0) {
@@ -454,10 +581,8 @@ int uvc_stream_read_frame(UvcStream *stream, frame_callback_t cb, void *user_dat
             }
             memcpy(stream->reassembly_buf + stream->reassembly_len, data, length);
             stream->reassembly_len = total;
-
             parse_frames(stream, stream->reassembly_buf,
                          stream->reassembly_len, cb, user_data);
-            /* parse_frames updates reassembly_len if there's leftover */
         } else {
             stream->reassembly_len = 0;
             parse_frames(stream, data, length, cb, user_data);
@@ -483,7 +608,7 @@ void uvc_stream_stop(UvcStream *stream)
     }
 
     stream->streaming = false;
-    LOG_INFO("Streaming stopped on %s", stream->dev_path);
+    LOG_INFO("STREAMOFF on %s", stream->dev_path);
 }
 
 void uvc_stream_close(UvcStream *stream)
@@ -511,10 +636,13 @@ void uvc_stream_close(UvcStream *stream)
 
 void uvc_stream_print_stats(const UvcStream *stream)
 {
-    LOG_INFO("=== Stream stats for %s ===", stream->dev_path);
-    LOG_INFO("  V4L2 buffers: %lu", (unsigned long)stream->v4l2_buffers_received);
-    LOG_INFO("  DY66 frames:  %lu", (unsigned long)stream->total_frames);
+    LOG_INFO("=== Stats %s ===", stream->dev_path);
+    LOG_INFO("  V4L2 bufs:    %lu (errors: %lu)",
+             (unsigned long)stream->v4l2_buffers_received,
+             (unsigned long)stream->v4l2_error_buffers);
+    LOG_INFO("  DY66 frames:  %lu (%lu video, %lu detect)",
+             (unsigned long)stream->total_frames,
+             (unsigned long)stream->video_frames,
+             (unsigned long)stream->detect_events);
     LOG_INFO("  Total bytes:  %lu", (unsigned long)stream->total_bytes);
-    LOG_INFO("  Video frames: %lu", (unsigned long)stream->video_frames);
-    LOG_INFO("  Detect events: %lu", (unsigned long)stream->detect_events);
 }
