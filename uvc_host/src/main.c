@@ -489,8 +489,8 @@ int main(int argc, char *argv[])
 
     /* Initialize and launch camera threads */
     for (int i = 0; i < n_cameras; i++) {
-        cameras[i].sensor_id   = (uint8_t)i;
-        cameras[i].channel     = UVC_MAKE_CHANNEL(i, 0);
+        cameras[i].sensor_id   = (uint8_t)(i * UVC_SENSORS_PER_DEVICE);
+        cameras[i].channel     = UVC_MAKE_CHANNEL(i * UVC_SENSORS_PER_DEVICE, 0);
         cameras[i].width       = width;
         cameras[i].height      = height;
         cameras[i].fps         = fps;

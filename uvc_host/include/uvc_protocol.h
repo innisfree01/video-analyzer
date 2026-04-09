@@ -114,6 +114,7 @@ typedef struct {
  *   sensor2: 6,7,8    sensor3: 9,10,11
  */
 #define UVC_CHANNELS_PER_SENSOR  3
+#define UVC_SENSORS_PER_DEVICE   2
 #define UVC_MAKE_CHANNEL(sensor, ch)  ((sensor) * UVC_CHANNELS_PER_SENSOR + (ch))
 
 /* ========================================================================
