@@ -93,7 +93,8 @@ static void on_frame(const UvcFrameHeader_t *header,
 
     switch (header->FrameType) {
     case UVC_FRAME_TYPE_VIDEO:
-        if (cam->save_video && cam->video_fp) {
+        if (cam->save_video && cam->video_fp &&
+            header->Channel == cam->channel) {
             if (!cam->got_keyframe) {
                 if (header->KeyFrame)
                     cam->got_keyframe = true;
