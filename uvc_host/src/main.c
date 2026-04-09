@@ -10,6 +10,7 @@
 #include <sys/ioctl.h>
 #include <linux/videodev2.h>
 #include <errno.h>
+#include <stdbool.h>
 
 #include "uvc_protocol.h"
 #include "uvc_xu_ctrl.h"
@@ -51,6 +52,7 @@ typedef struct {
 
     UvcStream   stream;
     FILE       *video_fp;
+    bool        got_keyframe;
     uint64_t    last_stats_time;
 
     pthread_t   thread;
@@ -92,6 +94,12 @@ static void on_frame(const UvcFrameHeader_t *header,
     switch (header->FrameType) {
     case UVC_FRAME_TYPE_VIDEO:
         if (cam->save_video && cam->video_fp) {
+            if (!cam->got_keyframe) {
+                if (header->KeyFrame)
+                    cam->got_keyframe = true;
+                else
+                    break;
+            }
             fwrite(payload, 1, payload_len, cam->video_fp);
         }
         if (header->KeyFrame) {

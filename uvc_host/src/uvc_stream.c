@@ -222,6 +222,10 @@ static int find_max_resolution(int fd, uint32_t pixfmt,
 #ifndef V4L2_PIX_FMT_H264
 #define V4L2_PIX_FMT_H264  v4l2_fourcc('H', '2', '6', '4')
 #endif
+#ifndef V4L2_PIX_FMT_H265
+#define V4L2_PIX_FMT_H265  v4l2_fourcc('H', '2', '6', '5')
+#endif
+
 #ifndef V4L2_PIX_FMT_MJPG
 #define V4L2_PIX_FMT_MJPG  v4l2_fourcc('M', 'J', 'P', 'G')
 #endif
@@ -253,8 +257,13 @@ int uvc_stream_find_best_format(UvcStream *stream, uint32_t want_width,
     } candidates[4];
     int n_candidates = 0;
 
-    if (want_venc == UVC_VENC_TYPE_H265 || want_venc == UVC_VENC_TYPE_H264) {
-        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H264, want_venc, "H264"};
+    if (want_venc == UVC_VENC_TYPE_H265) {
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H265, UVC_VENC_TYPE_H265, "H265"};
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H264, UVC_VENC_TYPE_H265, "H264"};
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_MJPG, UVC_VENC_TYPE_MJPEG, "MJPG"};
+        candidates[n_candidates++] = (typeof(candidates[0])){LOCAL_PIX_FMT_YUYV, UVC_VENC_TYPE_YUV, "YUYV"};
+    } else if (want_venc == UVC_VENC_TYPE_H264) {
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H264, UVC_VENC_TYPE_H264, "H264"};
         candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_MJPG, UVC_VENC_TYPE_MJPEG, "MJPG"};
         candidates[n_candidates++] = (typeof(candidates[0])){LOCAL_PIX_FMT_YUYV, UVC_VENC_TYPE_YUV, "YUYV"};
     } else if (want_venc == UVC_VENC_TYPE_MJPEG) {
