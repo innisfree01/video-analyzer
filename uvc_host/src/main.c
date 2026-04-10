@@ -38,9 +38,14 @@ static void signal_handler(int sig)
  * ======================================================================== */
 
 typedef struct {
-    char        dev_path[64];
-    uint8_t     sensor_id;       /* 0 for /dev/video0, 1 for /dev/video2, etc. */
     uint8_t     channel;
+    FILE       *video_fp;
+    bool        got_keyframe;
+} SensorSlot;
+
+typedef struct {
+    char        dev_path[64];
+    uint8_t     base_sensor;     /* first sensor index on this UVC device */
     uint16_t    width;
     uint16_t    height;
     uint8_t     fps;
@@ -51,8 +56,7 @@ typedef struct {
     int         save_detect;
 
     UvcStream   stream;
-    FILE       *video_fp;
-    bool        got_keyframe;
+    SensorSlot  sensors[UVC_SENSORS_PER_DEVICE];
     uint64_t    last_stats_time;
 
     pthread_t   thread;
@@ -85,6 +89,15 @@ static const char *venc_to_ext(uint8_t venc)
  * Frame callback — processes each decoded frame from the stream
  * ======================================================================== */
 
+static SensorSlot *find_sensor_slot(CameraContext *cam, uint8_t channel)
+{
+    for (int s = 0; s < UVC_SENSORS_PER_DEVICE; s++) {
+        if (cam->sensors[s].channel == channel)
+            return &cam->sensors[s];
+    }
+    return NULL;
+}
+
 static void on_frame(const UvcFrameHeader_t *header,
                      const uint8_t *payload, uint32_t payload_len,
                      void *user_data)
@@ -92,26 +105,27 @@ static void on_frame(const UvcFrameHeader_t *header,
     CameraContext *cam = (CameraContext *)user_data;
 
     switch (header->FrameType) {
-    case UVC_FRAME_TYPE_VIDEO:
-        if (cam->save_video && cam->video_fp &&
-            header->Channel == cam->channel) {
-            if (!cam->got_keyframe) {
+    case UVC_FRAME_TYPE_VIDEO: {
+        SensorSlot *slot = find_sensor_slot(cam, header->Channel);
+        if (cam->save_video && slot && slot->video_fp) {
+            if (!slot->got_keyframe) {
                 if (header->KeyFrame)
-                    cam->got_keyframe = true;
+                    slot->got_keyframe = true;
                 else
                     break;
             }
-            fwrite(payload, 1, payload_len, cam->video_fp);
+            fwrite(payload, 1, payload_len, slot->video_fp);
         }
         if (header->KeyFrame) {
             fprintf(stdout, "[CAM%d] %s I-Frame #%u ch=%d %dx%d %s ts=%lu ms len=%u\n",
-                    cam->sensor_id, cam->dev_path,
+                    cam->base_sensor, cam->dev_path,
                     header->FrameIndex, header->Channel,
                     header->FrameWidth, header->FrameHeight,
                     venc_to_str(header->VencType),
                     (unsigned long)header->Timestamp, payload_len);
         }
         break;
+    }
 
     case UVC_FRAME_TYPE_DETECT: {
         const char *event_name = "unknown";
@@ -123,19 +137,19 @@ static void on_frame(const UvcFrameHeader_t *header,
             event_name = "sound";
 
         fprintf(stdout, "[CAM%d] DETECT event=%s ch=%d payload=%u bytes\n",
-                cam->sensor_id, event_name, header->Channel, payload_len);
+                cam->base_sensor, event_name, header->Channel, payload_len);
 
         if (cam->save_detect && payload_len > 0) {
             char path[512];
             snprintf(path, sizeof(path), "%s/cam%d_detect_%s_%u.jpg",
-                     cam->output_dir, cam->sensor_id, event_name,
+                     cam->output_dir, cam->base_sensor, event_name,
                      header->FrameIndex);
             FILE *fp = fopen(path, "wb");
             if (fp) {
                 fwrite(payload, 1, payload_len, fp);
                 fclose(fp);
                 fprintf(stdout, "[CAM%d] Saved detection snapshot: %s\n",
-                        cam->sensor_id, path);
+                        cam->base_sensor, path);
             }
         }
         break;
@@ -146,31 +160,29 @@ static void on_frame(const UvcFrameHeader_t *header,
             UvcBindInfo_t bind_info;
             memcpy(&bind_info, payload, sizeof(bind_info));
             fprintf(stdout, "[CAM%d] NETWORK bind: ssid=%s token=%s\n",
-                    cam->sensor_id, bind_info.ssid, bind_info.token);
+                    cam->base_sensor, bind_info.ssid, bind_info.token);
         }
         break;
     }
 
     case UVC_FRAME_TYPE_GPS_RTK:
         fprintf(stdout, "[CAM%d] GPS-RTK: %.*s\n",
-                cam->sensor_id, (int)payload_len, payload);
+                cam->base_sensor, (int)payload_len, payload);
         break;
 
     case UVC_FRAME_TYPE_IPC_RESET:
-        fprintf(stdout, "[CAM%d] IPC RESET event received!\n", cam->sensor_id);
+        fprintf(stdout, "[CAM%d] IPC RESET event received!\n", cam->base_sensor);
         break;
 
     case UVC_FRAME_TYPE_GSENSOR_DATA:
-        /* High-frequency data, suppress logging */
         break;
 
     case UVC_FRAME_TYPE_AUDIO:
-        /* Audio frames, suppress logging */
         break;
 
     default:
         fprintf(stdout, "[CAM%d] Unknown frame type=%d len=%u\n",
-                cam->sensor_id, header->FrameType, payload_len);
+                cam->base_sensor, header->FrameType, payload_len);
         break;
     }
 }
@@ -185,13 +197,13 @@ static void *camera_worker(void *arg)
     int ret;
 
     fprintf(stdout, "[CAM%d] Worker thread started for %s\n",
-            cam->sensor_id, cam->dev_path);
+            cam->base_sensor, cam->dev_path);
 
     /* 1. Open the V4L2 device */
     ret = uvc_stream_open(&cam->stream, cam->dev_path);
     if (ret < 0) {
         fprintf(stderr, "[CAM%d] Failed to open stream %s\n",
-                cam->sensor_id, cam->dev_path);
+                cam->base_sensor, cam->dev_path);
         cam->thread_running = 0;
         return NULL;
     }
@@ -207,7 +219,7 @@ static void *camera_worker(void *arg)
                                       cam->venc, &sel);
     if (ret < 0) {
         fprintf(stderr, "[CAM%d] No compatible format on %s\n",
-                cam->sensor_id, cam->dev_path);
+                cam->base_sensor, cam->dev_path);
         uvc_stream_close(&cam->stream);
         cam->thread_running = 0;
         return NULL;
@@ -220,12 +232,12 @@ static void *camera_worker(void *arg)
 
     if (actual_venc != cam->venc) {
         fprintf(stdout, "[CAM%d] V4L2 format requires venc=%s (requested %s)\n",
-                cam->sensor_id, venc_to_str(actual_venc), venc_to_str(cam->venc));
+                cam->base_sensor, venc_to_str(actual_venc), venc_to_str(cam->venc));
     }
 
     ret = uvc_stream_set_format(&cam->stream, sel.pixfmt, sel.width, sel.height);
     if (ret < 0) {
-        fprintf(stderr, "[CAM%d] Failed to set V4L2 format\n", cam->sensor_id);
+        fprintf(stderr, "[CAM%d] Failed to set V4L2 format\n", cam->base_sensor);
         uvc_stream_close(&cam->stream);
         cam->thread_running = 0;
         return NULL;
@@ -240,14 +252,14 @@ static void *camera_worker(void *arg)
     /* 5. Query device info */
     char version[64] = {0};
     if (uvc_get_device_info(fd, version, sizeof(version)) == 0) {
-        fprintf(stdout, "[CAM%d] Device firmware: %s\n", cam->sensor_id, version);
+        fprintf(stdout, "[CAM%d] Device firmware: %s\n", cam->base_sensor, version);
     }
 
     /* 6. Start V4L2 streaming FIRST, then open XU channel.
      *    USB streaming endpoint must be active before device pushes data. */
     ret = uvc_stream_start(&cam->stream);
     if (ret < 0) {
-        fprintf(stderr, "[CAM%d] Failed to start V4L2 streaming\n", cam->sensor_id);
+        fprintf(stderr, "[CAM%d] Failed to start V4L2 streaming\n", cam->base_sensor);
         uvc_stream_close(&cam->stream);
         cam->thread_running = 0;
         return NULL;
@@ -255,34 +267,34 @@ static void *camera_worker(void *arg)
 
     usleep(200000);
 
-    /* 7. Open the video channel via XU (switch_on=1).
-     *    Use the venc that matches the V4L2 format. */
-    ret = uvc_open_video_channel(fd, cam->channel,
-                                 actual_width, actual_height,
-                                 actual_venc, cam->fps, cam->bitrate);
-    if (ret < 0) {
-        fprintf(stderr, "[CAM%d] Failed to open video channel via XU\n", cam->sensor_id);
-        uvc_stream_close(&cam->stream);
-        cam->thread_running = 0;
-        return NULL;
-    }
-
-    fprintf(stdout, "[CAM%d] XU switch_on: ch=%d %dx%d %s, waiting for frames...\n",
-            cam->sensor_id, cam->channel, actual_width, actual_height,
-            venc_to_str(actual_venc));
-
-    /* 8. Open video file for saving */
-    if (cam->save_video) {
-        char filepath[512];
-        snprintf(filepath, sizeof(filepath), "%s/cam%d_ch%d.%s",
-                 cam->output_dir, cam->sensor_id, cam->channel,
-                 venc_to_ext(actual_venc));
-        cam->video_fp = fopen(filepath, "wb");
-        if (!cam->video_fp) {
-            fprintf(stderr, "[CAM%d] Cannot open output file %s: %s\n",
-                    cam->sensor_id, filepath, strerror(errno));
+    /* 7. Open video channels for all sensors on this UVC device */
+    for (int s = 0; s < UVC_SENSORS_PER_DEVICE; s++) {
+        uint8_t ch = cam->sensors[s].channel;
+        ret = uvc_open_video_channel(fd, ch,
+                                     actual_width, actual_height,
+                                     actual_venc, cam->fps, cam->bitrate);
+        if (ret < 0) {
+            fprintf(stderr, "[CAM%d] Failed to open video channel %d via XU\n",
+                    cam->base_sensor, ch);
         } else {
-            fprintf(stdout, "[CAM%d] Saving video to %s\n", cam->sensor_id, filepath);
+            fprintf(stdout, "[CAM%d] XU switch_on: ch=%d %dx%d %s\n",
+                    cam->base_sensor, ch, actual_width, actual_height,
+                    venc_to_str(actual_venc));
+        }
+
+        if (cam->save_video) {
+            char filepath[512];
+            snprintf(filepath, sizeof(filepath), "%s/sensor%d_ch%d.%s",
+                     cam->output_dir, cam->base_sensor + s, ch,
+                     venc_to_ext(actual_venc));
+            cam->sensors[s].video_fp = fopen(filepath, "wb");
+            if (!cam->sensors[s].video_fp) {
+                fprintf(stderr, "[CAM%d] Cannot open output file %s: %s\n",
+                        cam->base_sensor, filepath, strerror(errno));
+            } else {
+                fprintf(stdout, "[CAM%d] Saving video to %s\n",
+                        cam->base_sensor, filepath);
+            }
         }
     }
 
@@ -299,18 +311,20 @@ static void *camera_worker(void *arg)
 
             if (consecutive_timeouts == 1) {
                 fprintf(stderr, "[CAM%d] Timeout #1 — re-sending XU switch_on...\n",
-                        cam->sensor_id);
-                uvc_open_video_channel(fd, cam->channel,
-                                       actual_width, actual_height,
-                                       actual_venc, cam->fps, cam->bitrate);
+                        cam->base_sensor);
+                for (int s = 0; s < UVC_SENSORS_PER_DEVICE; s++)
+                    uvc_open_video_channel(fd, cam->sensors[s].channel,
+                                           actual_width, actual_height,
+                                           actual_venc, cam->fps, cam->bitrate);
             } else if (consecutive_timeouts == 3) {
                 fprintf(stderr, "[CAM%d] Timeout #3 — requesting keyframe...\n",
-                        cam->sensor_id);
-                uvc_request_keyframe(fd, cam->channel);
+                        cam->base_sensor);
+                for (int s = 0; s < UVC_SENSORS_PER_DEVICE; s++)
+                    uvc_request_keyframe(fd, cam->sensors[s].channel);
             } else if (consecutive_timeouts >= 6) {
                 fprintf(stderr, "[CAM%d] Too many timeouts (%d). "
                         "Restarting V4L2 stream...\n",
-                        cam->sensor_id, consecutive_timeouts);
+                        cam->base_sensor, consecutive_timeouts);
 
                 uvc_stream_stop(&cam->stream);
                 usleep(500000);
@@ -318,14 +332,15 @@ static void *camera_worker(void *arg)
                 ret = uvc_stream_start(&cam->stream);
                 if (ret < 0) {
                     fprintf(stderr, "[CAM%d] Failed to restart streaming\n",
-                            cam->sensor_id);
+                            cam->base_sensor);
                     break;
                 }
 
                 usleep(200000);
-                uvc_open_video_channel(fd, cam->channel,
-                                       actual_width, actual_height,
-                                       actual_venc, cam->fps, cam->bitrate);
+                for (int s = 0; s < UVC_SENSORS_PER_DEVICE; s++)
+                    uvc_open_video_channel(fd, cam->sensors[s].channel,
+                                           actual_width, actual_height,
+                                           actual_venc, cam->fps, cam->bitrate);
                 consecutive_timeouts = 0;
             }
 
@@ -347,16 +362,17 @@ static void *camera_worker(void *arg)
     }
 
     /* 12. Cleanup */
-    fprintf(stdout, "[CAM%d] Shutting down...\n", cam->sensor_id);
+    fprintf(stdout, "[CAM%d] Shutting down...\n", cam->base_sensor);
 
-    uvc_close_video_channel(fd, cam->channel);
+    for (int s = 0; s < UVC_SENSORS_PER_DEVICE; s++) {
+        uvc_close_video_channel(fd, cam->sensors[s].channel);
+        if (cam->sensors[s].video_fp) {
+            fclose(cam->sensors[s].video_fp);
+            cam->sensors[s].video_fp = NULL;
+        }
+    }
     uvc_stream_stop(&cam->stream);
     uvc_stream_close(&cam->stream);
-
-    if (cam->video_fp) {
-        fclose(cam->video_fp);
-        cam->video_fp = NULL;
-    }
 
     uvc_stream_print_stats(&cam->stream);
     cam->thread_running = 0;
@@ -489,8 +505,11 @@ int main(int argc, char *argv[])
 
     /* Initialize and launch camera threads */
     for (int i = 0; i < n_cameras; i++) {
-        cameras[i].sensor_id   = (uint8_t)(i * UVC_SENSORS_PER_DEVICE);
-        cameras[i].channel     = UVC_MAKE_CHANNEL(i * UVC_SENSORS_PER_DEVICE, 0);
+        cameras[i].base_sensor = (uint8_t)(i * UVC_SENSORS_PER_DEVICE);
+        for (int s = 0; s < UVC_SENSORS_PER_DEVICE; s++) {
+            cameras[i].sensors[s].channel =
+                UVC_MAKE_CHANNEL(cameras[i].base_sensor + s, 0);
+        }
         cameras[i].width       = width;
         cameras[i].height      = height;
         cameras[i].fps         = fps;
@@ -501,8 +520,10 @@ int main(int argc, char *argv[])
         strncpy(cameras[i].output_dir, output_dir, sizeof(cameras[i].output_dir) - 1);
         cameras[i].thread_running = 1;
 
-        fprintf(stdout, "Starting camera %d: %s -> channel %d\n",
-                i, cameras[i].dev_path, cameras[i].channel);
+        fprintf(stdout, "Starting camera %d: %s -> channels [%d, %d]\n",
+                i, cameras[i].dev_path,
+                cameras[i].sensors[0].channel,
+                cameras[i].sensors[1].channel);
 
         int ret = pthread_create(&cameras[i].thread, NULL,
                                  camera_worker, &cameras[i]);
