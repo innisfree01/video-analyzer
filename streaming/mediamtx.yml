@@ -1,0 +1,36 @@
+###############################################
+# MediaMTX configuration for video-analyzer
+# 4-channel WebRTC streaming from UVC cameras
+###############################################
+
+# Log level: debug, info, warn, error
+logLevel: info
+
+# ─── API ─────────────────────────────────────
+api: yes
+apiAddress: :9997
+
+# ─── RTSP server (receives streams from FFmpeg) ─
+rtsp: yes
+rtspAddress: :8554
+protocols: [tcp]
+
+# ─── WebRTC server (serves streams to browsers) ─
+webrtc: yes
+webrtcAddress: :8889
+webrtcLocalUDPAddress: :8189
+webrtcLocalTCPAddress: :8189
+
+# ─── HLS fallback (for browsers without WebRTC H.264) ─
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+
+# ─── Stream paths ────────────────────────────
+# FFmpeg pushes to rtsp://localhost:8554/cam0..cam3
+# Browsers connect via WebRTC at http://<IP>:8889/cam0..cam3
+paths:
+  cam0:
+  cam1:
+  cam2:
+  cam3:

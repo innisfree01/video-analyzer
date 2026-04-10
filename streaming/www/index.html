@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Video Analyzer - 4CH Live</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    background: #16213e;
+    padding: 12px 24px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    border-bottom: 1px solid #0f3460;
+  }
+  header h1 { font-size: 18px; font-weight: 600; color: #e94560; }
+  header .status { font-size: 13px; color: #888; }
+  .grid {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    grid-template-rows: 1fr 1fr;
+    gap: 4px;
+    padding: 4px;
+    background: #0a0a1a;
+  }
+  .cell {
+    position: relative;
+    background: #111;
+    border-radius: 4px;
+    overflow: hidden;
+    cursor: pointer;
+  }
+  .cell video {
+    width: 100%;
+    height: 100%;
+    object-fit: contain;
+    background: #000;
+  }
+  .cell .overlay {
+    position: absolute;
+    top: 0; left: 0; right: 0;
+    padding: 8px 12px;
+    background: linear-gradient(180deg, rgba(0,0,0,0.7) 0%, transparent 100%);
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    font-size: 13px;
+    pointer-events: none;
+  }
+  .cell .label { font-weight: 600; color: #fff; }
+  .cell .badge {
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 11px;
+    font-weight: 600;
+  }
+  .badge.connecting { background: #f39c12; color: #000; }
+  .badge.live { background: #27ae60; color: #fff; }
+  .badge.error { background: #e74c3c; color: #fff; }
+  .badge.offline { background: #555; color: #ccc; }
+
+  .cell.fullscreen {
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    z-index: 100;
+    border-radius: 0;
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Video Analyzer - 4CH Live</h1>
+  <div class="status" id="clock"></div>
+</header>
+
+<div class="grid" id="grid">
+  <div class="cell" data-cam="cam0" ondblclick="toggleFullscreen(this)">
+    <video autoplay muted playsinline></video>
+    <div class="overlay">
+      <span class="label">CAM 0 - Sensor 0</span>
+      <span class="badge offline" id="badge-cam0">OFFLINE</span>
+    </div>
+  </div>
+  <div class="cell" data-cam="cam1" ondblclick="toggleFullscreen(this)">
+    <video autoplay muted playsinline></video>
+    <div class="overlay">
+      <span class="label">CAM 1 - Sensor 1</span>
+      <span class="badge offline" id="badge-cam1">OFFLINE</span>
+    </div>
+  </div>
+  <div class="cell" data-cam="cam2" ondblclick="toggleFullscreen(this)">
+    <video autoplay muted playsinline></video>
+    <div class="overlay">
+      <span class="label">CAM 2 - Sensor 2</span>
+      <span class="badge offline" id="badge-cam2">OFFLINE</span>
+    </div>
+  </div>
+  <div class="cell" data-cam="cam3" ondblclick="toggleFullscreen(this)">
+    <video autoplay muted playsinline></video>
+    <div class="overlay">
+      <span class="label">CAM 3 - Sensor 3</span>
+      <span class="badge offline" id="badge-cam3">OFFLINE</span>
+    </div>
+  </div>
+</div>
+
+<script>
+/*
+ * WebRTC WHEP client for MediaMTX
+ * Connects to MediaMTX's WHEP endpoint to receive video via WebRTC.
+ *
+ * WHEP (WebRTC-HTTP Egress Protocol) flow:
+ *   1. Browser creates RTCPeerConnection
+ *   2. POST SDP offer to MediaMTX WHEP endpoint
+ *   3. Receive SDP answer
+ *   4. ICE candidates are exchanged via STUN
+ *   5. Video flows peer-to-peer (or via TURN)
+ */
+
+const MEDIAMTX_HOST = window.location.hostname || '192.168.3.34';
+const MEDIAMTX_PORT = 8889;
+const RECONNECT_DELAY = 3000;
+
+function updateClock() {
+  document.getElementById('clock').textContent = new Date().toLocaleString('zh-CN');
+}
+setInterval(updateClock, 1000);
+updateClock();
+
+function setBadge(camId, state) {
+  const badge = document.getElementById('badge-' + camId);
+  if (!badge) return;
+  badge.className = 'badge ' + state;
+  const labels = { connecting: 'CONNECTING', live: 'LIVE', error: 'ERROR', offline: 'OFFLINE' };
+  badge.textContent = labels[state] || state.toUpperCase();
+}
+
+function toggleFullscreen(cell) {
+  cell.classList.toggle('fullscreen');
+}
+
+class WHEPClient {
+  constructor(videoElement, camId) {
+    this.video = videoElement;
+    this.camId = camId;
+    this.pc = null;
+    this.whepUrl = `http://${MEDIAMTX_HOST}:${MEDIAMTX_PORT}/${camId}/whep`;
+    this.sessionUrl = null;
+    this.running = true;
+    this.connect();
+  }
+
+  async connect() {
+    if (!this.running) return;
+    setBadge(this.camId, 'connecting');
+
+    try {
+      if (this.pc) {
+        this.pc.close();
+        this.pc = null;
+      }
+
+      this.pc = new RTCPeerConnection({
+        iceServers: [{ urls: 'stun:stun.l.google.com:19302' }]
+      });
+
+      this.pc.addTransceiver('video', { direction: 'recvonly' });
+
+      this.pc.ontrack = (event) => {
+        this.video.srcObject = event.streams[0];
+        setBadge(this.camId, 'live');
+      };
+
+      this.pc.oniceconnectionstatechange = () => {
+        const state = this.pc.iceConnectionState;
+        if (state === 'disconnected' || state === 'failed' || state === 'closed') {
+          setBadge(this.camId, 'error');
+          this.scheduleReconnect();
+        }
+      };
+
+      const offer = await this.pc.createOffer();
+      await this.pc.setLocalDescription(offer);
+
+      const response = await fetch(this.whepUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/sdp' },
+        body: this.pc.localDescription.sdp
+      });
+
+      if (response.status !== 201) {
+        throw new Error(`WHEP POST failed: ${response.status}`);
+      }
+
+      this.sessionUrl = new URL(
+        response.headers.get('Location'),
+        this.whepUrl
+      ).toString();
+
+      const answerSDP = await response.text();
+      await this.pc.setRemoteDescription({
+        type: 'answer',
+        sdp: answerSDP
+      });
+
+    } catch (err) {
+      console.warn(`[${this.camId}] Connection failed:`, err.message);
+      setBadge(this.camId, 'error');
+      this.scheduleReconnect();
+    }
+  }
+
+  scheduleReconnect() {
+    if (!this.running) return;
+    setTimeout(() => this.connect(), RECONNECT_DELAY);
+  }
+
+  destroy() {
+    this.running = false;
+    if (this.pc) {
+      this.pc.close();
+      this.pc = null;
+    }
+    if (this.sessionUrl) {
+      fetch(this.sessionUrl, { method: 'DELETE' }).catch(() => {});
+    }
+  }
+}
+
+// Initialize all 4 channels
+const clients = [];
+document.querySelectorAll('.cell').forEach(cell => {
+  const camId = cell.dataset.cam;
+  const video = cell.querySelector('video');
+  clients.push(new WHEPClient(video, camId));
+});
+</script>
+</body>
+</html>
