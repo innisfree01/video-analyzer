@@ -148,10 +148,15 @@ static int format_supports_size(int fd, uint32_t pixfmt,
 
     while (xioctl(fd, VIDIOC_ENUM_FRAMESIZES, &frmsize) == 0) {
         if (frmsize.type == V4L2_FRMSIZE_TYPE_DISCRETE) {
+            LOG_INFO("    Size[%u]: %ux%u", frmsize.index,
+                         frmsize.discrete.width, frmsize.discrete.height);
             if (frmsize.discrete.width == width &&
                 frmsize.discrete.height == height)
                 return 1;
         } else {
+            LOG_INFO("    Size range: %u-%u x %u-%u",
+                         frmsize.stepwise.min_width, frmsize.stepwise.max_width,
+                         frmsize.stepwise.min_height, frmsize.stepwise.max_height);
             if (width >= frmsize.stepwise.min_width &&
                 width <= frmsize.stepwise.max_width &&
                 height >= frmsize.stepwise.min_height &&
@@ -242,11 +247,12 @@ int uvc_stream_find_best_format(UvcStream *stream, uint32_t want_width,
     /*
      * Strategy: match the V4L2 pixel format to the desired XU encoding.
      *
-     * H.264/H.265 via XU → V4L2 H264 format (H.265 is tunneled through H.264 pipe)
-     * MJPEG via XU        → V4L2 MJPG format
-     * YUV via XU          → V4L2 YUYV format
+     * The UVC spec has no native H.265 descriptor, so devices typically
+     * tunnel H.265 data through the MJPG or H264 V4L2 pipe.  The actual
+     * encoding is controlled by the XU extension unit, not by V4L2.
      *
-     * If the preferred format isn't available, fall back to the next best option.
+     * For H.265 we prefer MJPG pipe because it often supports higher
+     * resolutions (e.g. 1920x1080) than the H264 pipe (max 1280x720).
      */
 
     /* Priority list based on user's requested encoding */
@@ -259,8 +265,8 @@ int uvc_stream_find_best_format(UvcStream *stream, uint32_t want_width,
 
     if (want_venc == UVC_VENC_TYPE_H265) {
         candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H265, UVC_VENC_TYPE_H265, "H265"};
+        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_MJPG, UVC_VENC_TYPE_H265, "MJPG"};
         candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H264, UVC_VENC_TYPE_H265, "H264"};
-        candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_MJPG, UVC_VENC_TYPE_MJPEG, "MJPG"};
         candidates[n_candidates++] = (typeof(candidates[0])){LOCAL_PIX_FMT_YUYV, UVC_VENC_TYPE_YUV, "YUYV"};
     } else if (want_venc == UVC_VENC_TYPE_H264) {
         candidates[n_candidates++] = (typeof(candidates[0])){V4L2_PIX_FMT_H264, UVC_VENC_TYPE_H264, "H264"};
