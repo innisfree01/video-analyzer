@@ -11,6 +11,7 @@
 #include <linux/videodev2.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <fcntl.h>
 
 #include "uvc_protocol.h"
 #include "uvc_xu_ctrl.h"
@@ -23,6 +24,7 @@
 #define DEFAULT_BITRATE     2000   /* Kbps */
 #define DEFAULT_VENC        UVC_VENC_TYPE_H265
 #define DEFAULT_OUTPUT_DIR  "./output"
+#define DEFAULT_PIPE_DIR    "/tmp/uvc_stream"
 
 static volatile int g_running = 1;
 
@@ -33,6 +35,25 @@ static void signal_handler(int sig)
     fprintf(stderr, "\nReceived signal %d, shutting down...\n", sig);
 }
 
+/*
+ * Write to a named-pipe fd with SIGPIPE protection.
+ * Returns bytes written, or -1 on error (pipe broken / no reader).
+ */
+static ssize_t pipe_write(int fd, const void *buf, size_t len)
+{
+    sigset_t block, prev;
+    sigemptyset(&block);
+    sigaddset(&block, SIGPIPE);
+    pthread_sigmask(SIG_BLOCK, &block, &prev);
+
+    ssize_t n = write(fd, buf, len);
+    int saved_errno = errno;
+
+    pthread_sigmask(SIG_SETMASK, &prev, NULL);
+    errno = saved_errno;
+    return n;
+}
+
 /* ========================================================================
  * Per-camera context
  * ======================================================================== */
@@ -41,6 +62,8 @@ typedef struct {
     uint8_t     channel;
     FILE       *video_fp;
     bool        got_keyframe;
+    int         pipe_fd;        /* named-pipe fd, -1 if unused */
+    char        pipe_path[256]; /* e.g. /tmp/uvc_stream/sensor0_ch0.h265 */
 } SensorSlot;
 
 typedef struct {
@@ -54,6 +77,8 @@ typedef struct {
     char        output_dir[256];
     int         save_video;
     int         save_detect;
+    int         pipe_enabled;
+    char        pipe_dir[256];
 
     UvcStream   stream;
     SensorSlot  sensors[UVC_SENSORS_PER_DEVICE];
@@ -107,15 +132,37 @@ static void on_frame(const UvcFrameHeader_t *header,
     switch (header->FrameType) {
     case UVC_FRAME_TYPE_VIDEO: {
         SensorSlot *slot = find_sensor_slot(cam, header->Channel);
-        if (cam->save_video && slot && slot->video_fp) {
-            if (!slot->got_keyframe) {
-                if (header->KeyFrame)
-                    slot->got_keyframe = true;
-                else
-                    break;
-            }
-            fwrite(payload, 1, payload_len, slot->video_fp);
+        if (!slot)
+            break;
+
+        if (!slot->got_keyframe) {
+            if (header->KeyFrame)
+                slot->got_keyframe = true;
+            else
+                break;
         }
+
+        /* Write to file */
+        if (cam->save_video && slot->video_fp)
+            fwrite(payload, 1, payload_len, slot->video_fp);
+
+        /* Write to named pipe (non-blocking, tolerates no reader) */
+        if (slot->pipe_path[0]) {
+            if (slot->pipe_fd < 0) {
+                /* Pipe not yet open — retry on each keyframe */
+                if (header->KeyFrame)
+                    slot->pipe_fd = open(slot->pipe_path,
+                                         O_WRONLY | O_NONBLOCK);
+            }
+            if (slot->pipe_fd >= 0) {
+                ssize_t n = pipe_write(slot->pipe_fd, payload, payload_len);
+                if (n < 0 && errno == EPIPE) {
+                    close(slot->pipe_fd);
+                    slot->pipe_fd = -1;
+                }
+            }
+        }
+
         if (header->KeyFrame) {
             fprintf(stdout, "[CAM%d] %s I-Frame #%u ch=%d %dx%d %s ts=%lu ms len=%u\n",
                     cam->base_sensor, cam->dev_path,
@@ -296,6 +343,33 @@ static void *camera_worker(void *arg)
                         cam->base_sensor, filepath);
             }
         }
+
+        /* Create named pipe for live streaming */
+        if (cam->pipe_enabled) {
+            snprintf(cam->sensors[s].pipe_path,
+                     sizeof(cam->sensors[s].pipe_path),
+                     "%s/sensor%d_ch%d.%s",
+                     cam->pipe_dir, cam->base_sensor + s, ch,
+                     venc_to_ext(actual_venc));
+
+            unlink(cam->sensors[s].pipe_path);
+            if (mkfifo(cam->sensors[s].pipe_path, 0666) < 0 && errno != EEXIST) {
+                fprintf(stderr, "[CAM%d] mkfifo(%s) failed: %s\n",
+                        cam->base_sensor, cam->sensors[s].pipe_path,
+                        strerror(errno));
+            } else {
+                cam->sensors[s].pipe_fd =
+                    open(cam->sensors[s].pipe_path, O_WRONLY | O_NONBLOCK);
+                if (cam->sensors[s].pipe_fd < 0 && errno == ENXIO) {
+                    /* No reader yet — that's OK, we'll retry in on_frame */
+                    fprintf(stdout, "[CAM%d] Pipe %s created (no reader yet)\n",
+                            cam->base_sensor, cam->sensors[s].pipe_path);
+                } else if (cam->sensors[s].pipe_fd >= 0) {
+                    fprintf(stdout, "[CAM%d] Pipe %s opened for writing\n",
+                            cam->base_sensor, cam->sensors[s].pipe_path);
+                }
+            }
+        }
     }
 
     /* 11. Main capture loop */
@@ -370,6 +444,12 @@ static void *camera_worker(void *arg)
             fclose(cam->sensors[s].video_fp);
             cam->sensors[s].video_fp = NULL;
         }
+        if (cam->sensors[s].pipe_fd >= 0) {
+            close(cam->sensors[s].pipe_fd);
+            cam->sensors[s].pipe_fd = -1;
+        }
+        if (cam->sensors[s].pipe_path[0])
+            unlink(cam->sensors[s].pipe_path);
     }
     uvc_stream_stop(&cam->stream);
     uvc_stream_close(&cam->stream);
@@ -402,17 +482,21 @@ static void print_usage(const char *prog)
         "  -o, --output DIR       Output directory (default: %s)\n"
         "  -s, --save             Save video stream to file\n"
         "  -S, --save-detect      Save detection event snapshots\n"
+        "  -p, --pipe             Output to named pipes for live streaming\n"
+        "  -P, --pipe-dir DIR     Pipe directory (default: %s)\n"
         "  -h, --help             Show this help\n"
         "\n"
         "Examples:\n"
         "  %s -d /dev/video0 -d /dev/video2 -s\n"
         "  %s -d /dev/video0 -W 1280 -H 720 -f 25 -e h264 -b 1000 -s\n"
         "  %s                                   # uses default /dev/video0 + /dev/video2\n"
+        "  %s -p                                # output to named pipes in %s\n"
+        "  %s -p -P /tmp/my_pipes               # pipes in custom directory\n"
         "\n",
         prog,
         DEFAULT_WIDTH, DEFAULT_HEIGHT, DEFAULT_FPS, DEFAULT_BITRATE,
-        DEFAULT_OUTPUT_DIR,
-        prog, prog, prog);
+        DEFAULT_OUTPUT_DIR, DEFAULT_PIPE_DIR,
+        prog, prog, prog, prog, DEFAULT_PIPE_DIR, prog);
 }
 
 static uint8_t parse_venc(const char *str)
@@ -437,6 +521,8 @@ int main(int argc, char *argv[])
     char     output_dir[256] = DEFAULT_OUTPUT_DIR;
     int      save_video  = 0;
     int      save_detect = 0;
+    int      pipe_enabled = 0;
+    char     pipe_dir[256] = DEFAULT_PIPE_DIR;
 
     memset(cameras, 0, sizeof(cameras));
 
@@ -450,12 +536,14 @@ int main(int argc, char *argv[])
         {"output",      required_argument, 0, 'o'},
         {"save",        no_argument,       0, 's'},
         {"save-detect", no_argument,       0, 'S'},
+        {"pipe",        no_argument,       0, 'p'},
+        {"pipe-dir",    required_argument, 0, 'P'},
         {"help",        no_argument,       0, 'h'},
         {0, 0, 0, 0}
     };
 
     int opt;
-    while ((opt = getopt_long(argc, argv, "d:W:H:f:b:e:o:sSh", long_opts, NULL)) != -1) {
+    while ((opt = getopt_long(argc, argv, "d:W:H:f:b:e:o:sSpP:h", long_opts, NULL)) != -1) {
         switch (opt) {
         case 'd':
             if (n_cameras < MAX_CAMERAS) {
@@ -472,6 +560,11 @@ int main(int argc, char *argv[])
         case 'o': strncpy(output_dir, optarg, sizeof(output_dir) - 1); break;
         case 's': save_video  = 1; break;
         case 'S': save_detect = 1; break;
+        case 'p': pipe_enabled = 1; break;
+        case 'P':
+            pipe_enabled = 1;
+            strncpy(pipe_dir, optarg, sizeof(pipe_dir) - 1);
+            break;
         case 'h': print_usage(argv[0]); return 0;
         default:  print_usage(argv[0]); return 1;
         }
@@ -487,6 +580,10 @@ int main(int argc, char *argv[])
     /* Create output directory */
     mkdir(output_dir, 0755);
 
+    /* Create pipe directory */
+    if (pipe_enabled)
+        mkdir(pipe_dir, 0755);
+
     /* Install signal handler */
     signal(SIGINT,  signal_handler);
     signal(SIGTERM, signal_handler);
@@ -501,6 +598,7 @@ int main(int argc, char *argv[])
     fprintf(stdout, " Bitrate:    %d Kbps\n", bitrate);
     fprintf(stdout, " Output:     %s\n", output_dir);
     fprintf(stdout, " Save video: %s\n", save_video ? "YES" : "NO");
+    fprintf(stdout, " Pipe out:   %s\n", pipe_enabled ? pipe_dir : "NO");
     fprintf(stdout, "========================================\n\n");
 
     /* Initialize and launch camera threads */
@@ -509,15 +607,18 @@ int main(int argc, char *argv[])
         for (int s = 0; s < UVC_SENSORS_PER_DEVICE; s++) {
             cameras[i].sensors[s].channel =
                 UVC_MAKE_CHANNEL(cameras[i].base_sensor + s, 0);
+            cameras[i].sensors[s].pipe_fd = -1;
         }
-        cameras[i].width       = width;
-        cameras[i].height      = height;
-        cameras[i].fps         = fps;
-        cameras[i].bitrate     = bitrate;
-        cameras[i].venc        = venc;
-        cameras[i].save_video  = save_video;
-        cameras[i].save_detect = save_detect;
+        cameras[i].width        = width;
+        cameras[i].height       = height;
+        cameras[i].fps          = fps;
+        cameras[i].bitrate      = bitrate;
+        cameras[i].venc         = venc;
+        cameras[i].save_video   = save_video;
+        cameras[i].save_detect  = save_detect;
+        cameras[i].pipe_enabled = pipe_enabled;
         strncpy(cameras[i].output_dir, output_dir, sizeof(cameras[i].output_dir) - 1);
+        strncpy(cameras[i].pipe_dir, pipe_dir, sizeof(cameras[i].pipe_dir) - 1);
         cameras[i].thread_running = 1;
 
         fprintf(stdout, "Starting camera %d: %s -> channels [%d, %d]\n",
