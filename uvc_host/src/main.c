@@ -35,6 +35,8 @@ static void signal_handler(int sig)
     fprintf(stderr, "\nReceived signal %d, shutting down...\n", sig);
 }
 
+#define PIPE_BUF_SIZE  (1 << 20)  /* 1 MiB — max allowed by Linux */
+
 /*
  * Write to a named-pipe fd with SIGPIPE protection.
  * Returns bytes written, or -1 on error (pipe broken / no reader).
@@ -62,8 +64,9 @@ typedef struct {
     uint8_t     channel;
     FILE       *video_fp;
     bool        got_keyframe;
-    int         pipe_fd;        /* named-pipe fd, -1 if unused */
-    char        pipe_path[256]; /* e.g. /tmp/uvc_stream/sensor0_ch0.h265 */
+    int         pipe_fd;            /* named-pipe fd, -1 if unused */
+    bool        pipe_need_keyframe; /* true = waiting for I-frame before pipe write */
+    char        pipe_path[256];     /* e.g. /tmp/uvc_stream/sensor0_ch0.h265 */
 } SensorSlot;
 
 typedef struct {
@@ -148,20 +151,37 @@ static void on_frame(const UvcFrameHeader_t *header,
 
         /* Write to named pipe (non-blocking, tolerates no reader) */
         if (slot->pipe_path[0]) {
-            if (slot->pipe_fd < 0) {
-                /* Pipe not yet open — retry on each keyframe */
-                if (header->KeyFrame)
-                    slot->pipe_fd = open(slot->pipe_path,
-                                         O_WRONLY | O_NONBLOCK);
+            /* Try to open pipe on keyframes if not yet connected */
+            if (slot->pipe_fd < 0 && header->KeyFrame) {
+                slot->pipe_fd = open(slot->pipe_path,
+                                     O_WRONLY | O_NONBLOCK);
+                if (slot->pipe_fd >= 0) {
+                    fcntl(slot->pipe_fd, F_SETPIPE_SZ, PIPE_BUF_SIZE);
+                    slot->pipe_need_keyframe = true;
+                }
             }
+
             if (slot->pipe_fd >= 0) {
+                /* After pipe open or data loss, wait for a keyframe */
+                if (slot->pipe_need_keyframe) {
+                    if (!header->KeyFrame)
+                        goto pipe_done;
+                    slot->pipe_need_keyframe = false;
+                }
+
                 ssize_t n = pipe_write(slot->pipe_fd, payload, payload_len);
-                if (n < 0 && errno == EPIPE) {
-                    close(slot->pipe_fd);
-                    slot->pipe_fd = -1;
+                if (n < 0) {
+                    if (errno == EPIPE) {
+                        close(slot->pipe_fd);
+                        slot->pipe_fd = -1;
+                    } else if (errno == EAGAIN) {
+                        /* Buffer full — drop frame, resync on next keyframe */
+                        slot->pipe_need_keyframe = true;
+                    }
                 }
             }
         }
+        pipe_done:
 
         if (header->KeyFrame) {
             fprintf(stdout, "[CAM%d] %s I-Frame #%u ch=%d %dx%d %s ts=%lu ms len=%u\n",
@@ -361,12 +381,15 @@ static void *camera_worker(void *arg)
                 cam->sensors[s].pipe_fd =
                     open(cam->sensors[s].pipe_path, O_WRONLY | O_NONBLOCK);
                 if (cam->sensors[s].pipe_fd < 0 && errno == ENXIO) {
-                    /* No reader yet — that's OK, we'll retry in on_frame */
                     fprintf(stdout, "[CAM%d] Pipe %s created (no reader yet)\n",
                             cam->base_sensor, cam->sensors[s].pipe_path);
                 } else if (cam->sensors[s].pipe_fd >= 0) {
-                    fprintf(stdout, "[CAM%d] Pipe %s opened for writing\n",
-                            cam->base_sensor, cam->sensors[s].pipe_path);
+                    fcntl(cam->sensors[s].pipe_fd, F_SETPIPE_SZ,
+                          PIPE_BUF_SIZE);
+                    cam->sensors[s].pipe_need_keyframe = true;
+                    fprintf(stdout, "[CAM%d] Pipe %s opened (buf=%d)\n",
+                            cam->base_sensor, cam->sensors[s].pipe_path,
+                            PIPE_BUF_SIZE);
                 }
             }
         }
