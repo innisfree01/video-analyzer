@@ -13,6 +13,10 @@
 #include <stdbool.h>
 #include <fcntl.h>
 
+#ifndef F_SETPIPE_SZ
+#define F_SETPIPE_SZ  1031
+#endif
+
 #include "uvc_protocol.h"
 #include "uvc_xu_ctrl.h"
 #include "uvc_stream.h"
@@ -169,15 +173,29 @@ static void on_frame(const UvcFrameHeader_t *header,
                     slot->pipe_need_keyframe = false;
                 }
 
+                /*
+                 * Pre-check: ensure pipe has room for the ENTIRE frame.
+                 * A partial write would corrupt the H.265 bitstream.
+                 */
+                int queued = 0;
+                if (ioctl(slot->pipe_fd, FIONREAD, &queued) == 0) {
+                    if (PIPE_BUF_SIZE - queued < (int)payload_len) {
+                        slot->pipe_need_keyframe = true;
+                        goto pipe_done;
+                    }
+                }
+
                 ssize_t n = pipe_write(slot->pipe_fd, payload, payload_len);
                 if (n < 0) {
                     if (errno == EPIPE) {
                         close(slot->pipe_fd);
                         slot->pipe_fd = -1;
                     } else if (errno == EAGAIN) {
-                        /* Buffer full — drop frame, resync on next keyframe */
                         slot->pipe_need_keyframe = true;
                     }
+                } else if ((size_t)n < payload_len) {
+                    /* Partial write — bitstream corrupted, resync */
+                    slot->pipe_need_keyframe = true;
                 }
             }
         }
