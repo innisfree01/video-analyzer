@@ -61,12 +61,12 @@ if [ ! -d "$PIPE_DIR" ]; then
     exit 1
 fi
 
-mkdir -p "$PID_DIR"
-
 # ─── Stop any existing instances ──────────────
 echo "Stopping any existing instances..."
 bash "$(dirname "$0")/stop.sh" 2>/dev/null || true
 sleep 1
+
+mkdir -p "$PID_DIR"
 
 # ─── Start MediaMTX ──────────────────────────
 echo ""
