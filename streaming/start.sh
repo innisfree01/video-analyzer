@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Start MediaMTX + 4x FFmpeg transcoding pipelines
+# Start MediaMTX + 4x transcoding pipelines (GStreamer HW or FFmpeg fallback)
 # Reads H.265 from named pipes, transcodes to H.264, pushes to MediaMTX via RTSP.
 #
 # Usage:
@@ -37,7 +37,9 @@ done
 
 # ─── Detect H.264 encoder ────────────────────
 detect_encoder() {
-    if ffmpeg -encoders 2>/dev/null | grep -q "h264_nvmpi"; then
+    if gst-inspect-1.0 nvv4l2h264enc &>/dev/null; then
+        echo "gst_nvenc"
+    elif ffmpeg -encoders 2>/dev/null | grep -q "h264_nvmpi"; then
         echo "h264_nvmpi"
     elif ffmpeg -encoders 2>/dev/null | grep -q "h264_v4l2m2m"; then
         echo "h264_v4l2m2m"
@@ -81,7 +83,7 @@ if ! kill -0 "$MEDIAMTX_PID" 2>/dev/null; then
     exit 1
 fi
 
-# ─── Start FFmpeg pipelines ──────────────────
+# ─── Start transcoding pipelines ─────────────
 if [ "$PASSTHROUGH" -eq 0 ]; then
     ENCODER=$(detect_encoder)
     echo ""
@@ -89,7 +91,7 @@ if [ "$PASSTHROUGH" -eq 0 ]; then
 fi
 
 echo ""
-echo "=== Starting FFmpeg streams ==="
+echo "=== Starting streams ==="
 for entry in "${STREAMS[@]}"; do
     PIPE_NAME="${entry%%:*}"
     RTSP_PATH="${entry##*:}"
@@ -101,15 +103,33 @@ for entry in "${STREAMS[@]}"; do
     fi
 
     if [ "$PASSTHROUGH" -eq 1 ]; then
-        # H.265 passthrough — no transcoding
         ffmpeg -nostdin -hide_banner -loglevel warning \
             -fflags nobuffer -flags low_delay \
             -f hevc -i "$PIPE_FILE" \
             -c:v copy \
             -f rtsp -rtsp_transport tcp \
             "${RTSP_BASE}/${RTSP_PATH}" &
+    elif [ "$ENCODER" = "gst_nvenc" ]; then
+        # GStreamer HW transcode (nvv4l2) → FFmpeg RTSP push
+        gst-launch-1.0 -q \
+            filesrc location="$PIPE_FILE" do-timestamp=true \
+            ! h265parse \
+            ! nvv4l2decoder \
+            ! nvv4l2h264enc \
+                bitrate=2000000 \
+                maxperf-enable=true \
+                preset-level=1 \
+                insert-sps-pps=true \
+                iframeinterval=30 \
+            ! h264parse \
+            ! fdsink fd=1 \
+        | ffmpeg -nostdin -hide_banner -loglevel warning \
+            -fflags nobuffer -flags low_delay \
+            -f h264 -i - \
+            -c:v copy \
+            -f rtsp -rtsp_transport tcp \
+            "${RTSP_BASE}/${RTSP_PATH}" &
     else
-        # Transcode H.265 → H.264
         EXTRA_OPTS=""
         if [ "$ENCODER" = "libx264" ]; then
             EXTRA_OPTS="-preset ultrafast -tune zerolatency"
