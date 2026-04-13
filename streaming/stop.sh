@@ -1,6 +1,6 @@
 #!/bin/bash
 #
-# Stop MediaMTX and all FFmpeg streaming processes.
+# Stop MediaMTX and all streaming processes (GStreamer / FFmpeg).
 #
 PID_DIR="/tmp/uvc_streaming_pids"
 
@@ -20,8 +20,9 @@ if [ -d "$PID_DIR" ]; then
     rmdir "$PID_DIR" 2>/dev/null || true
 fi
 
-# Safety: kill any remaining MediaMTX / FFmpeg processes from our setup
+# Safety: kill any remaining processes from our setup
 pkill -f "mediamtx.*mediamtx.yml" 2>/dev/null || true
+pkill -f "gst-launch.*uvc_stream" 2>/dev/null || true
 pkill -f "ffmpeg.*uvc_stream" 2>/dev/null || true
 
 echo "Done."

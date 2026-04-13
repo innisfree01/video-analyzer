@@ -103,14 +103,11 @@ for entry in "${STREAMS[@]}"; do
     fi
 
     if [ "$PASSTHROUGH" -eq 1 ]; then
-        ffmpeg -nostdin -hide_banner -loglevel warning \
-            -fflags nobuffer -flags low_delay \
-            -f hevc -i "$PIPE_FILE" \
-            -c:v copy \
-            -f rtsp -rtsp_transport tcp \
-            "${RTSP_BASE}/${RTSP_PATH}" &
+        gst-launch-1.0 -q \
+            filesrc location="$PIPE_FILE" do-timestamp=true \
+            ! h265parse \
+            ! rtspclientsink location="${RTSP_BASE}/${RTSP_PATH}" protocols=tcp &
     elif [ "$ENCODER" = "gst_nvenc" ]; then
-        # GStreamer HW transcode (nvv4l2) → FFmpeg RTSP push
         gst-launch-1.0 -q \
             filesrc location="$PIPE_FILE" do-timestamp=true \
             ! h265parse \
@@ -121,14 +118,8 @@ for entry in "${STREAMS[@]}"; do
                 preset-level=1 \
                 insert-sps-pps=true \
                 iframeinterval=30 \
-            ! h264parse \
-            ! fdsink fd=1 \
-        | ffmpeg -nostdin -hide_banner -loglevel warning \
-            -fflags nobuffer -flags low_delay \
-            -f h264 -i - \
-            -c:v copy \
-            -f rtsp -rtsp_transport tcp \
-            "${RTSP_BASE}/${RTSP_PATH}" &
+            ! h264parse config-interval=1 \
+            ! rtspclientsink location="${RTSP_BASE}/${RTSP_PATH}" protocols=tcp &
     else
         EXTRA_OPTS=""
         if [ "$ENCODER" = "libx264" ]; then
@@ -142,9 +133,9 @@ for entry in "${STREAMS[@]}"; do
             "${RTSP_BASE}/${RTSP_PATH}" &
     fi
 
-    FFPID=$!
-    echo "$FFPID" > "${PID_DIR}/ffmpeg_${RTSP_PATH}.pid"
-    echo "  ${RTSP_PATH}: pipe=${PIPE_FILE}  PID=${FFPID}"
+    STRPID=$!
+    echo "$STRPID" > "${PID_DIR}/stream_${RTSP_PATH}.pid"
+    echo "  ${RTSP_PATH}: pipe=${PIPE_FILE}  PID=${STRPID}"
 done
 
 echo ""
