@@ -1,13 +1,13 @@
 #!/bin/bash
 #
-# Start MediaMTX + 4x transcoding pipelines (GStreamer HW or FFmpeg fallback)
+# Start MediaMTX + transcoding pipelines (GStreamer NVENC HW or FFmpeg fallback)
 # Reads H.265 from named pipes, transcodes to H.264, pushes to MediaMTX via RTSP.
 #
 # Usage:
 #   bash start.sh                       # default: transcode H.265 → H.264
 #   bash start.sh --passthrough         # no transcode, push H.265 directly
 #   bash start.sh --pipe-dir /path      # custom pipe directory
-#   bash start.sh --max-hw-streams 3    # max concurrent NVENC sessions (default: 2)
+#   bash start.sh --max-hw-streams 4    # max concurrent NVENC sessions (default: 4)
 #
 set -e
 
@@ -17,7 +17,7 @@ MEDIAMTX_CONF="$(cd "$(dirname "$0")" && pwd)/mediamtx.yml"
 RTSP_BASE="rtsp://localhost:8554"
 PASSTHROUGH=0
 PID_DIR="/tmp/uvc_streaming_pids"
-MAX_HW_STREAMS=2
+MAX_HW_STREAMS=4
 
 # Stream mapping: pipe_name -> rtsp_path
 STREAMS=(
@@ -108,14 +108,17 @@ for entry in "${STREAMS[@]}"; do
 
     if [ "$PASSTHROUGH" -eq 1 ]; then
         gst-launch-1.0 -q \
-            filesrc location="$PIPE_FILE" do-timestamp=true \
+            fdsrc fd=0 \
             ! h265parse \
-            ! rtspclientsink location="${RTSP_BASE}/${RTSP_PATH}" protocols=tcp &
+            ! "video/x-h265,framerate=30/1" \
+            ! rtspclientsink location="${RTSP_BASE}/${RTSP_PATH}" protocols=tcp \
+        < "$PIPE_FILE" &
         ENC_LABEL="passthrough"
     elif [ "$ENCODER" = "gst_nvenc" ] && [ "$HW_COUNT" -lt "$MAX_HW_STREAMS" ]; then
         gst-launch-1.0 -q \
-            filesrc location="$PIPE_FILE" do-timestamp=true \
+            fdsrc fd=0 \
             ! h265parse \
+            ! "video/x-h265,framerate=30/1" \
             ! nvv4l2decoder \
             ! nvv4l2h264enc \
                 bitrate=2000000 \
@@ -124,10 +127,11 @@ for entry in "${STREAMS[@]}"; do
                 insert-sps-pps=true \
                 iframeinterval=30 \
             ! h264parse config-interval=1 \
-            ! rtspclientsink location="${RTSP_BASE}/${RTSP_PATH}" protocols=tcp &
+            ! rtspclientsink location="${RTSP_BASE}/${RTSP_PATH}" protocols=tcp \
+        < "$PIPE_FILE" &
         HW_COUNT=$((HW_COUNT + 1))
         ENC_LABEL="gst_nvenc"
-        sleep 1
+        sleep 2
     else
         ffmpeg -nostdin -hide_banner -loglevel warning \
             -fflags nobuffer -flags low_delay \
