@@ -7,6 +7,10 @@ uvc_host/*.a
 *.so
 *.dylib
 
+# Node.js
+node_modules/
+web/dist/
+
 # IDE 配置
 .vscode/
 .idea/
