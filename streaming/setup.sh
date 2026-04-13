@@ -6,7 +6,7 @@
 set -e
 
 MEDIAMTX_VERSION="v1.17.1"
-ARCH="linux_arm64v8"
+ARCH="linux_arm64"
 INSTALL_DIR="/opt/mediamtx"
 TARBALL="mediamtx_${MEDIAMTX_VERSION}_${ARCH}.tar.gz"
 URL="https://github.com/bluenviron/mediamtx/releases/download/${MEDIAMTX_VERSION}/${TARBALL}"
