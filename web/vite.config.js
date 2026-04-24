@@ -27,6 +27,15 @@ export default defineConfig({
         target: 'http://192.168.3.34:9997',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/mediamtx/, '')
+      },
+      // AI backend (event_engine + vlm_worker + summary_job + api_server).
+      // The dev server forwards /api/ai/* to the FastAPI service running on
+      // the AGX. The /api/ai prefix is stripped so backend routes stay
+      // simple ("/events", "/summary", ...).
+      '/api/ai': {
+        target: 'http://192.168.3.34:8000',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/api\/ai/, '')
       }
     }
   }

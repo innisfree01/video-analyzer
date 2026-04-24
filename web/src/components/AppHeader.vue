@@ -21,6 +21,7 @@ const route = useRoute()
 const navItems = [
   { path: '/video', label: '实时视频', icon: '📹' },
   { path: '/events', label: '事件列表', icon: '🔔' },
+  { path: '/summary', label: '日报总结', icon: '📊' },
   { path: '/devices', label: '设备管理', icon: '🖥️' },
 ]
 

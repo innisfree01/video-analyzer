@@ -1,0 +1,46 @@
+# ─── AI event-understanding service configuration ──────────────────
+# All paths are absolute and assume the AGX layout
+# (NVMe SSD mounted at /mnt/nova_ssd; MediaMTX listening on the local box).
+
+channels:
+  - { id: cam0, rtsp: "rtsp://localhost:8554/cam0" }
+  - { id: cam1, rtsp: "rtsp://localhost:8554/cam1" }
+  - { id: cam2, rtsp: "rtsp://localhost:8554/cam2" }
+  - { id: cam3, rtsp: "rtsp://localhost:8554/cam3" }
+
+motion:
+  fps: 5                    # downsample to this many frames/sec for MOG2
+  min_area_ratio: 0.01      # foreground pixels must exceed this fraction of frame
+  trigger_frames: 3         # consecutive qualifying frames required to fire
+  cooldown_sec: 30          # per-channel debounce window
+  warmup_frames: 30         # let MOG2 learn background first
+  blur_kernel: 5            # gaussian blur kernel size to suppress camera noise
+
+storage:
+  db_path: /mnt/nova_ssd/events.db
+  snapshot_dir: /mnt/nova_ssd/events
+  pre_event_sec: 1
+  post_event_sec: 4
+  jpeg_quality: 85
+
+ollama:
+  url: http://localhost:11434
+  vlm_model: qwen2.5vl:3b
+  llm_model: qwen2.5:7b-instruct-q4_K_M
+  timeout_sec: 120
+  vlm_poll_interval_sec: 2
+  vlm_batch_size: 5
+
+mediamtx:
+  api: http://localhost:9997
+  # Public base used by the browser to reach MediaMTX playback HTTP endpoint.
+  # Replace IP if your AGX LAN address changes.
+  playback_base: http://192.168.3.34:9996
+
+api:
+  host: 0.0.0.0
+  port: 8000
+
+logging:
+  level: INFO
+  log_dir: /mnt/nova_ssd/ai_logs

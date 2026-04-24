@@ -55,6 +55,22 @@ hlsAddress: :8888
 hlsAlwaysRemux: yes
 hlsAllowOrigin: '*'
 
+# ─── Recording (for event playback) ──────────
+# All paths inherit these defaults unless overridden in `paths:`.
+# Segments are written as fmp4 to NVMe SSD and auto-deleted after 7 days.
+# Event API queries by timestamp to extract the matching clip.
+pathDefaults:
+  record: yes
+  recordPath: /mnt/nova_ssd/recordings/%path/%Y-%m-%d_%H-%M-%S-%f
+  recordFormat: fmp4
+  recordPartDuration: 1s
+  recordSegmentDuration: 60s
+  recordDeleteAfter: 168h
+
+# ─── Playback server (HTTP API to fetch recorded clips by time) ─
+playback: yes
+playbackAddress: :9996
+
 # ─── Stream paths ────────────────────────────
 # FFmpeg pushes to rtsp://localhost:8554/cam0..cam3
 # Browsers connect via WebRTC at http://<IP>:8889/cam0..cam3

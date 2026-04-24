@@ -31,6 +31,12 @@ const router = createRouter({
       meta: { title: '事件列表', icon: 'notifications' }
     },
     {
+      path: '/summary',
+      name: 'summary',
+      component: () => import('@/views/SummaryView.vue'),
+      meta: { title: '日报总结', icon: 'summarize' }
+    },
+    {
       path: '/devices',
       name: 'devices',
       component: () => import('@/views/DevicesView.vue'),
