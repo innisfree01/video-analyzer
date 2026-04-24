@@ -29,7 +29,13 @@
 import { ref, watch, onUnmounted } from 'vue'
 
 const RECONNECT_DELAY = 3000
-const ICE_SERVERS = [{ urls: 'stun:stun.l.google.com:19302' }]
+/*
+ * In a LAN-only deployment, ICE candidates discovered locally are sufficient.
+ * Public STUN servers (e.g. stun.l.google.com) require outbound internet
+ * access and may delay or even fail ICE gathering on isolated networks.
+ * Leave empty for LAN; add { urls: 'stun:...' } when going across networks.
+ */
+const ICE_SERVERS = []
 
 export function useWhepPlayer() {
   const videoRef = ref(null)

@@ -6,6 +6,27 @@
 # Log level: debug, info, warn, error
 logLevel: info
 
+# ─── Authentication ──────────────────────────
+# In MediaMTX v1.x, API/playback/publish all require auth by default.
+# For LAN deployment we allow anonymous access from any IP for read+API,
+# but require explicit auth for publishing (protects against rogue pushes).
+authMethod: internal
+authInternalUsers:
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: api
+      - action: metrics
+      - action: pprof
+      - action: read
+      - action: playback
+  - user: any
+    pass:
+    ips: []
+    permissions:
+      - action: publish
+
 # ─── API ─────────────────────────────────────
 api: yes
 apiAddress: :9997
@@ -20,11 +41,19 @@ webrtc: yes
 webrtcAddress: :8889
 webrtcLocalUDPAddress: :8189
 webrtcLocalTCPAddress: :8189
+# Allow CORS so VMS web (running on a different port like :3000) can call WHEP
+webrtcAllowOrigin: '*'
+# Advertise the LAN IP so that ICE candidates point to a reachable address
+# (Replace with your AGX LAN IP if it changes)
+webrtcAdditionalHosts: [192.168.3.34]
+# In LAN, STUN is unnecessary and may slow down ICE; keep empty
+webrtcICEServers2: []
 
 # ─── HLS fallback (for browsers without WebRTC H.264) ─
 hls: yes
 hlsAddress: :8888
 hlsAlwaysRemux: yes
+hlsAllowOrigin: '*'
 
 # ─── Stream paths ────────────────────────────
 # FFmpeg pushes to rtsp://localhost:8554/cam0..cam3
