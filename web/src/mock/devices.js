@@ -9,11 +9,16 @@
  * - Channel (通道): 代表设备上的一路视频流，对应 MediaMTX 的一个 stream path
  */
 
+const defaultAgxIp =
+  (typeof window !== 'undefined' && window.location?.hostname && window.location.hostname !== 'localhost'
+    ? window.location.hostname
+    : '192.168.3.34')
+
 export const mockDevices = [
   {
     id: 'device-agx-1',
     name: 'AGX Orin #1',
-    ip: '192.168.3.34',
+    ip: defaultAgxIp,
     status: 'online',
     type: 'jetson',
     mediamtxPort: 8889,
