@@ -10,9 +10,9 @@ channels:
 
 motion:
   fps: 5                    # downsample to this many frames/sec for MOG2
-  min_area_ratio: 0.01      # foreground pixels must exceed this fraction of frame
+  min_area_ratio: 0.03      # foreground pixels must exceed this fraction of frame
   trigger_frames: 3         # consecutive qualifying frames required to fire
-  cooldown_sec: 30          # per-channel debounce window
+  cooldown_sec: 120         # per-channel debounce window
   warmup_frames: 30         # let MOG2 learn background first
   blur_kernel: 5            # gaussian blur kernel size to suppress camera noise
 
