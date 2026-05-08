@@ -24,7 +24,7 @@ export default defineConfig({
     port: 3000,
     proxy: {
       '/api/mediamtx': {
-        target: 'http://192.168.3.34:9997',
+        target: 'http://127.0.0.1:9997',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/mediamtx/, '')
       },
@@ -33,7 +33,7 @@ export default defineConfig({
       // the AGX. The /api/ai prefix is stripped so backend routes stay
       // simple ("/events", "/summary", ...).
       '/api/ai': {
-        target: 'http://192.168.3.34:8000',
+        target: 'http://127.0.0.1:18000',
         changeOrigin: true,
         rewrite: (path) => path.replace(/^\/api\/ai/, '')
       }

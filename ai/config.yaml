@@ -39,7 +39,7 @@ mediamtx:
 
 api:
   host: 0.0.0.0
-  port: 8000
+  port: 18000
 
 logging:
   level: INFO
