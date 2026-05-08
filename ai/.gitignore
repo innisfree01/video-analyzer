@@ -9,3 +9,5 @@ logs/
 *.db-journal
 *.db-wal
 *.db-shm
+feishu.yaml
+.feishu_msg_*.md

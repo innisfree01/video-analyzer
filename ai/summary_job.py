@@ -33,6 +33,8 @@ from common import (
     open_db,
     setup_logging,
 )
+from cursor_feishu_notify import CONFIG_FILE as FEISHU_CFG_FILE
+from cursor_feishu_notify import send_markdown as _feishu_send_markdown
 
 
 SYSTEM_PROMPT = (
@@ -56,6 +58,65 @@ USER_PROMPT_TPL = """以下是 {date} 这一天监控系统记录的 {n_events} 
 """
 
 JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
+
+
+SEVERITY_EMOJI = {"high": "🔴", "medium": "🟠", "low": "🟢"}
+
+
+def _feishu_enabled() -> bool:
+    """Push to Feishu if env var set OR ai/feishu.yaml has enable_summary_push: true."""
+    import os
+    if os.environ.get("FEISHU_WEBHOOK", "").strip():
+        return True
+    if not FEISHU_CFG_FILE.exists():
+        return False
+    try:
+        import yaml
+        data = yaml.safe_load(FEISHU_CFG_FILE.read_text(encoding="utf-8")) or {}
+    except Exception:
+        return False
+    return bool(data.get("webhook")) and bool(data.get("enable_summary_push", True))
+
+
+def _render_summary_markdown(payload: dict) -> str:
+    """Turn a summary payload into a compact Feishu-markdown body."""
+    lines = [
+        f"**日期**：{payload['date']}",
+        f"**事件总数**：{payload['total_events']}"
+        f"（🔴{payload['high_count']} · 🟠{payload['medium_count']} · 🟢{payload['low_count']}）",
+    ]
+    chan_stats = payload.get("channel_stats") or {}
+    if chan_stats:
+        lines.append(
+            "**通道活跃度**：" + "，".join(
+                f"{k}={v}" for k, v in sorted(chan_stats.items())
+            )
+        )
+    narrative = (payload.get("narrative") or "").strip()
+    if narrative:
+        lines += ["", "**整体情况**", narrative]
+
+    hls = payload.get("highlights") or []
+    if hls:
+        lines += ["", "**重要事件**"]
+        for h in hls[:10]:
+            emoji = SEVERITY_EMOJI.get(h.get("severity", "low"), "⚪")
+            lines.append(
+                f"- {emoji} `{h.get('time','')}` **{h.get('channel','')}** — {h.get('summary','')}"
+            )
+    lines += ["", f"_model: {payload.get('model','?')}_"]
+    return "\n".join(lines)
+
+
+def _push_to_feishu(payload: dict, log) -> None:
+    try:
+        body = _render_summary_markdown(payload)
+        title = f"AGX 安防日报 · {payload['date']}"
+        template = "red" if payload.get("high_count", 0) > 0 else "blue"
+        _feishu_send_markdown(title, body, template=template, timeout=10)
+        log.info("feishu summary pushed (date=%s)", payload["date"])
+    except Exception as e:
+        log.warning("feishu push failed (non-fatal): %s", e)
 
 
 def _date_to_window_ms(date_str: str) -> tuple[int, int]:
@@ -231,6 +292,10 @@ def generate_summary(date: str, log) -> dict:
         "wrote summary date=%s total=%d high=%d medium=%d low=%d hl=%d",
         date, payload["total_events"], high, medium, low, len(highlights),
     )
+
+    if _feishu_enabled():
+        _push_to_feishu(payload, log)
+
     return payload
 
 

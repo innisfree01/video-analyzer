@@ -1,0 +1,5 @@
+# Copy to feishu.yaml (which is gitignored) and fill in your custom-bot webhook.
+# You can also skip this file and just export FEISHU_WEBHOOK=<url>.
+webhook: "https://open.feishu.cn/open-apis/bot/v2/hook/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+# Optional: set to false to disable auto-push from summary_job.py.
+enable_summary_push: true
