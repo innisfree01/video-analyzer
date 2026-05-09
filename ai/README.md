@@ -111,6 +111,9 @@ curl http://localhost:8000/summary | python3 -m json.tool
 | `storage.snapshot_dir` | Where keyframes are written (NVMe recommended) |
 | `ollama.vlm_model` | Vision-language model name (must be `ollama pull`-ed) |
 | `ollama.llm_model` | Daily-summary model name |
+| `ollama.summary_timeout_sec` | Optional longer timeout for `summary_job` (defaults to `timeout_sec`) |
+| `ollama.summary_num_predict` | Max tokens for daily summary chat (smaller = faster) |
+| `ollama.summary_max_events_in_prompt` | Cap events sent to the LLM; full list still appears in DB fallback if the model fails |
 | `mediamtx.playback_base` | Public URL the browser uses for clip playback |
 
 ## Troubleshooting

@@ -29,6 +29,10 @@ ollama:
   # Daily summary uses /api/chat text-only; same VL model is OK and saves ~5GB vs 7B LLM.
   llm_model: qwen2.5vl:3b
   timeout_sec: 300
+  # Daily summary only: longer wait + shorter generation; VL on CPU often needs this.
+  summary_timeout_sec: 900
+  summary_num_predict: 512
+  summary_max_events_in_prompt: 30
   vlm_poll_interval_sec: 2
   vlm_batch_size: 5
 

@@ -141,7 +141,9 @@ def _format_events_for_prompt(events: list[dict], max_chars: int = 6000) -> str:
     return "\n".join(lines)
 
 
-def _call_llm(url: str, model: str, prompt: str, timeout: int) -> str:
+def _call_llm(
+    url: str, model: str, prompt: str, timeout: int, num_predict: int = 512,
+) -> str:
     r = requests.post(
         f"{url.rstrip('/')}/api/chat",
         json={
@@ -151,7 +153,7 @@ def _call_llm(url: str, model: str, prompt: str, timeout: int) -> str:
                 {"role": "user", "content": prompt},
             ],
             "stream": False,
-            "options": {"temperature": 0.3, "num_predict": 1024},
+            "options": {"temperature": 0.3, "num_predict": num_predict},
         },
         timeout=timeout,
     )
@@ -185,6 +187,64 @@ def _normalise_highlight(h: Any) -> dict | None:
         "summary": str(h.get("summary", "")).strip(),
         "severity": sev,
     }
+
+
+def _sev_rank(sev: str | None) -> int:
+    s = (sev or "low").lower()
+    return {"high": 0, "medium": 1, "low": 2}.get(s, 2)
+
+
+def _fallback_highlights(events: list[dict], limit: int = 10) -> list[dict]:
+    """Deterministic highlights when Ollama is slow/unavailable (DB fields only)."""
+    sorted_e = sorted(
+        events,
+        key=lambda e: (_sev_rank(e.get("severity")), e["ts"]),
+    )
+    out: list[dict] = []
+    for e in sorted_e[:limit]:
+        hhmm = time.strftime("%H:%M", time.localtime(e["ts"] / 1000))
+        desc = (e.get("description") or "无描述").replace("\n", " ").strip()[:200]
+        sev = e.get("severity") or "low"
+        if sev not in ("high", "medium", "low"):
+            sev = "low"
+        out.append({
+            "time": hhmm,
+            "channel": e["channel"],
+            "summary": desc,
+            "severity": sev,
+        })
+    return out
+
+
+def _fallback_narrative_body(
+    events: list[dict],
+    date: str,
+    high: int,
+    medium: int,
+    low: int,
+    chan_stats: dict[str, int],
+    max_lines: int = 25,
+) -> str:
+    """Multi-line factual digest from DB (no LLM)."""
+    sorted_e = sorted(
+        events,
+        key=lambda e: (_sev_rank(e.get("severity")), e["ts"]),
+    )
+    lines = [
+        f"{date} 共 {len(events)} 条事件（严重度 高/中/低：{high}/{medium}/{low}）。",
+        "**通道分布**："
+        + "，".join(f"{k}={v}" for k, v in sorted(chan_stats.items())),
+        "",
+        "**事件摘录**（按严重度、时间）：",
+    ]
+    for e in sorted_e[:max_lines]:
+        hhmm = time.strftime("%H:%M", time.localtime(e["ts"] / 1000))
+        desc = (e.get("description") or "无描述").replace("\n", " ").strip()[:400]
+        sev = e.get("severity") or "?"
+        lines.append(f"- `{hhmm}` **{e['channel']}** ({sev}) {desc}")
+    if len(events) > max_lines:
+        lines.append(f"- … 另有 {len(events) - max_lines} 条可在事件列表 / 数据库中查看")
+    return "\n".join(lines)
 
 
 def generate_summary(date: str, log) -> dict:
@@ -231,38 +291,68 @@ def generate_summary(date: str, log) -> dict:
         narrative = f"{date} 没有任何事件记录，监控系统全天平静。"
         print("[summary_job] skip LLM (no events)", flush=True)
     else:
+        fb_hl = _fallback_highlights(events)
+        fb_narr = _fallback_narrative_body(
+            events, date, high, medium, low, chan_stats,
+        )
+        cap = int(ollama.get("summary_max_events_in_prompt", 30))
+        sample = events[-cap:] if len(events) > cap else events
+        prompt_head = ""
+        if len(events) > cap:
+            prompt_head = (
+                f"说明：当日共 {len(events)} 条记录，下列为最近 {cap} 条（按时间）。\n\n"
+            )
+
+        to = int(ollama.get("summary_timeout_sec") or ollama["timeout_sec"])
+        np = int(ollama.get("summary_num_predict", 512))
+
         try:
             prompt = USER_PROMPT_TPL.format(
                 date=date,
                 n_events=len(events),
-                events_block=_format_events_for_prompt(events),
+                events_block=prompt_head + _format_events_for_prompt(
+                    sample, max_chars=4000,
+                ),
             )
-            to = int(ollama["timeout_sec"])
             print(
                 f"[summary_job] calling Ollama LLM model={used_model} "
-                f"timeout_sec={to} (wait…)",
+                f"timeout_sec={to} num_predict={np} (wait…)",
                 flush=True,
             )
             raw = _call_llm(
-                ollama["url"], used_model, prompt, to,
+                ollama["url"], used_model, prompt, to, num_predict=np,
             )
             print("[summary_job] Ollama LLM returned, parsing JSON…", flush=True)
             parsed = _parse_llm_json(raw)
-            if parsed:
-                hl_in = parsed.get("highlights") or []
-                if isinstance(hl_in, list):
-                    highlights = [
-                        h for h in (
-                            _normalise_highlight(x) for x in hl_in
-                        ) if h is not None
-                    ][:10]
-                narrative = str(parsed.get("narrative", "")).strip()
-            else:
+            if not parsed:
                 log.warning("LLM produced unparseable output: %r", raw[:200])
-                narrative = "[日报生成失败：模型输出无法解析]"
+                raise ValueError("LLM output not valid JSON")
+
+            hl_in = parsed.get("highlights") or []
+            if isinstance(hl_in, list):
+                highlights = [
+                    h for h in (
+                        _normalise_highlight(x) for x in hl_in
+                    ) if h is not None
+                ][:10]
+            narrative = str(parsed.get("narrative", "")).strip()
+            if not narrative:
+                raise ValueError("empty narrative from LLM")
+            if not highlights:
+                highlights = fb_hl
         except Exception as e:
-            log.exception("LLM call failed: %s", e)
-            narrative = f"[日报生成失败：{e}]"
+            log.warning("summary LLM failed, using DB fallback: %s", e)
+            print(
+                f"[summary_job] LLM failed → fallback digest ({type(e).__name__})",
+                flush=True,
+            )
+            highlights = fb_hl
+            short_err = str(e).replace("\n", " ")[:240]
+            narrative = (
+                "【自动整理】大模型未及时返回或解析失败，以下为根据数据库生成的事件摘录。\n\n"
+                f"_（原因：{short_err}）_\n\n"
+                + fb_narr
+            )
 
     payload = {
         "date": date,
