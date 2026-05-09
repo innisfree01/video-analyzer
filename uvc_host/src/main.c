@@ -18,6 +18,7 @@
 #endif
 
 #include "uvc_protocol.h"
+#include "uvc_event_record.h"
 #include "uvc_xu_ctrl.h"
 #include "uvc_stream.h"
 
@@ -223,6 +224,11 @@ static void on_frame(const UvcFrameHeader_t *header,
 
         fprintf(stdout, "[CAM%d] DETECT event=%s ch=%d payload=%u bytes\n",
                 cam->base_sensor, event_name, header->Channel, payload_len);
+
+        if (uvc_event_record_detect(header, payload, payload_len) < 0) {
+            fprintf(stderr, "[CAM%d] Failed to record detection event to AI DB\n",
+                    cam->base_sensor);
+        }
 
         if (cam->save_detect && payload_len > 0) {
             char path[512];

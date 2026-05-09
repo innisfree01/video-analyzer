@@ -83,6 +83,14 @@ sudo ./build/uvc_host -s -S
 | `-s, --save` | 保存视频流到文件 | 否 |
 | `-S, --save-detect` | 保存侦测事件快照 | 否 |
 
+侦测事件（`UVC_FRAME_TYPE_DETECT`）现在会始终写入 AI 事件库：
+
+- 数据库：`/mnt/nova_ssd/events.db`（可用 `UVC_AI_DB_PATH` 覆盖）
+- 快照目录：`/mnt/nova_ssd/events`（可用 `UVC_AI_SNAPSHOT_DIR` 覆盖）
+- 事件来源：`motion` / `human` / `sound`
+- 状态：直接写为 `analyzed`，供 Web 事件列表和 `summary_job.py` 日报读取
+- 若 payload 带 JPG 快照，会保存为 `YYYYMMDD/<event_id>/0_event.jpg`
+
 ## 输出文件
 
 保存视频流后，可以用 ffplay/ffmpeg 播放：
@@ -130,6 +138,7 @@ ffmpeg -f hevc -i output/cam0_ch0.h265 -c copy output/cam0.mp4
 - Linux 内核 V4L2 + UVC 驱动（Orin AGX 自带）
 - CMake >= 3.10
 - GCC / aarch64 工具链
+- SQLite3 开发库：`sudo apt install -y libsqlite3-dev`
 
 ## 通道编号
 

@@ -62,8 +62,12 @@ pip install -r ai/requirements.txt
 # Restart MediaMTX so the new `record:` config takes effect
 bash streaming/stop.sh && bash streaming/start.sh
 
-# Start AI services (event_engine + vlm_worker + api_server)
+# Start external-event ingest API only (default; no OpenCV motion detection)
 bash ai/start.sh
+
+# Optional legacy/local modes:
+# bash ai/start.sh --with-opencv   # local MOG2 motion detection
+# bash ai/start.sh --with-vlm      # analyze pending events with VLM
 
 # Tail logs
 tail -F ai/logs/*.out
@@ -83,18 +87,18 @@ nohup python ai/summary_job.py --daemon >ai/logs/summary_job.out 2>&1 &
 
 ```bash
 # 1. Liveness
-curl http://localhost:8000/health
+curl http://localhost:18000/health
 
 # 2. Today's events
-curl "http://localhost:8000/events?date=$(date +%F)" | python3 -m json.tool
+curl "http://localhost:18000/events?date=$(date +%F)" | python3 -m json.tool
 
-# 3. Trigger a synthetic event (no snapshot, just a webhook test)
-curl -X POST http://localhost:8000/events/external \
+# 3. Trigger a synthetic IPC event; AGX captures one current RTSP snapshot.
+curl -X POST http://localhost:18000/events/external \
      -H 'content-type: application/json' \
-     -d '{"channel":"cam0","description":"测试事件","severity":"medium","tags":["test"]}'
+     -d '{"channel":"cam0","event_type":"human","severity":"high","tags":["human"]}'
 
 # 4. Today's summary (lazy-aggregated if no LLM run yet)
-curl http://localhost:8000/summary | python3 -m json.tool
+curl http://localhost:18000/summary | python3 -m json.tool
 
 # 5. Browse the UI
 # Open http://192.168.3.34:3000/events  and  /summary

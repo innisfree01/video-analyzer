@@ -10,11 +10,12 @@ include_directories(${CMAKE_SOURCE_DIR}/include)
 
 set(SOURCES
     src/main.c
+    src/uvc_event_record.c
     src/uvc_xu_ctrl.c
     src/uvc_stream.c
 )
 
 add_executable(uvc_host ${SOURCES})
-target_link_libraries(uvc_host pthread)
+target_link_libraries(uvc_host pthread sqlite3)
 
 install(TARGETS uvc_host DESTINATION bin)

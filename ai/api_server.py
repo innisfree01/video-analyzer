@@ -28,6 +28,7 @@ from pathlib import Path
 from typing import Optional
 from urllib.parse import urlencode
 
+import cv2
 import yaml
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -102,6 +103,7 @@ class EventOut(BaseModel):
 
 class ExternalEventIn(BaseModel):
     channel: str = Field(..., description="cam0..camN")
+    event_type: str = Field("motion", description="motion | human | sound")
     ts: Optional[int] = Field(None, description="event time (unix ms); now if missing")
     description: Optional[str] = None
     severity: Optional[str] = None
@@ -162,6 +164,48 @@ def _date_range_ms(date_str: str) -> tuple[int, int]:
     start = int(time.mktime(t) * 1000)
     end = start + 24 * 3600 * 1000
     return start, end
+
+
+EXTERNAL_EVENT_TYPES = {"motion", "human", "sound"}
+DEFAULT_EVENT_SEVERITY = {
+    "motion": "medium",
+    "human": "high",
+    "sound": "medium",
+}
+DEFAULT_EVENT_TEXT = {
+    "motion": "IPC 上报移动侦测事件",
+    "human": "IPC 上报人形检测事件",
+    "sound": "IPC 上报声音检测事件",
+}
+
+
+def _channel_rtsp_map(cfg: dict) -> dict[str, str]:
+    return {
+        str(ch["id"]): str(ch["rtsp"])
+        for ch in cfg.get("channels", [])
+        if ch.get("id") and ch.get("rtsp")
+    }
+
+
+def _capture_snapshot(
+    rtsp_url: str,
+    dst: Path,
+    jpeg_quality: int,
+) -> bool:
+    """Best-effort one-frame RTSP snapshot for externally reported events."""
+    cap = cv2.VideoCapture(rtsp_url, cv2.CAP_FFMPEG)
+    try:
+        if not cap.isOpened():
+            return False
+        ok, frame = cap.read()
+        if not ok or frame is None:
+            return False
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        return bool(cv2.imwrite(
+            str(dst), frame, [int(cv2.IMWRITE_JPEG_QUALITY), jpeg_quality],
+        ))
+    finally:
+        cap.release()
 
 
 # ─── Endpoints ─────────────────────────────────────────────────────────
@@ -294,28 +338,59 @@ def ingest_external(payload: ExternalEventIn, request: Request,
                     db: sqlite3.Connection = Depends(get_db)):
     """Webhook endpoint: external NVR / IPC pushes an alarm here.
 
-    If description is provided, the event is stored as already 'analyzed'
-    (no VLM call). Otherwise it goes into the pending queue (but with no
-    snapshots, so the VLM will fail unless caller also POSTs images later).
+    The IPC owns lightweight detection (motion / human / sound). AGX only
+    persists the alarm and captures one current RTSP snapshot for review,
+    keeping the event analyzed so no VLM worker is required.
     """
     eid = uuid.uuid4().hex
     ts = payload.ts or now_ms()
-    severity = (payload.severity or "medium").lower()
+    event_type = (payload.event_type or "motion").lower().strip()
+    if event_type not in EXTERNAL_EVENT_TYPES:
+        raise HTTPException(400, f"invalid event_type: {payload.event_type}")
+
+    severity = (payload.severity or DEFAULT_EVENT_SEVERITY[event_type]).lower()
     if severity not in ("low", "medium", "high"):
-        severity = "medium"
-    status = "analyzed" if payload.description else "pending"
+        severity = DEFAULT_EVENT_SEVERITY[event_type]
+
+    cfg = request.app.state.cfg
+    storage = cfg["storage"]
+    snapshot_root: Path = request.app.state.snapshot_root
+    rtsp_url = _channel_rtsp_map(cfg).get(payload.channel)
+    if not rtsp_url:
+        raise HTTPException(400, f"unknown channel: {payload.channel}")
+
+    rel_snapshots: list[str] = []
+    evt_dir = snapshot_root / time.strftime("%Y%m%d", time.localtime(ts / 1000)) / eid
+    snap = evt_dir / "0_event.jpg"
+    if _capture_snapshot(rtsp_url, snap, int(storage.get("jpeg_quality", 85))):
+        rel_snapshots.append(str(snap.relative_to(snapshot_root)))
+    else:
+        request.app.state.log.warning(
+            "external event snapshot failed channel=%s rtsp=%s id=%s",
+            payload.channel, rtsp_url, eid,
+        )
+
+    description = payload.description or DEFAULT_EVENT_TEXT[event_type]
+    tags = payload.tags or [event_type]
+    extra = dict(payload.extra or {})
+    extra.setdefault("event_type", event_type)
+    extra.setdefault("rtsp", rtsp_url)
+
     db.execute(
         """INSERT INTO events
             (id, ts, channel, source, snapshots, clip_start, clip_end,
              status, description, severity, tags, extra,
              created_at, analyzed_at)
-           VALUES (?, ?, ?, 'webhook', '[]', ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+           VALUES (?, ?, ?, ?, ?, ?, ?, 'analyzed', ?, ?, ?, ?, ?, ?)""",
         (eid, ts, payload.channel,
-         ts - 1000, ts + 4000,
-         status, payload.description, severity,
-         json.dumps(payload.tags, ensure_ascii=False),
-         json.dumps(payload.extra, ensure_ascii=False),
-         now_ms(), now_ms() if status == "analyzed" else None),
+         event_type,
+         json.dumps(rel_snapshots, ensure_ascii=False),
+         ts - int(storage.get("pre_event_sec", 1) * 1000),
+         ts + int(storage.get("post_event_sec", 4) * 1000),
+         description, severity,
+         json.dumps(tags, ensure_ascii=False),
+         json.dumps(extra, ensure_ascii=False),
+         now_ms(), now_ms()),
     )
     row = db.execute("SELECT * FROM events WHERE id=?", (eid,)).fetchone()
     return _row_to_event(row, request)
