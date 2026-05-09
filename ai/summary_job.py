@@ -115,8 +115,10 @@ def _push_to_feishu(payload: dict, log) -> None:
         template = "red" if payload.get("high_count", 0) > 0 else "blue"
         _feishu_send_markdown(title, body, template=template, timeout=10)
         log.info("feishu summary pushed (date=%s)", payload["date"])
+        print("[summary_job] Feishu: push OK", flush=True)
     except Exception as e:
         log.warning("feishu push failed (non-fatal): %s", e)
+        print(f"[summary_job] Feishu: push FAILED — {e}", flush=True)
 
 
 def _date_to_window_ms(date_str: str) -> tuple[int, int]:
@@ -206,6 +208,13 @@ def generate_summary(date: str, log) -> dict:
 
     events = [dict(r) for r in rows]
     log.info("date=%s loaded %d events", date, len(events))
+    feishu_on = _feishu_enabled()
+    print(
+        f"[summary_job] date={date} loaded {len(events)} events | "
+        f"feishu_push={'on' if feishu_on else 'off'} "
+        f"(FEISHU_WEBHOOK or ai/feishu.yaml webhook + enable_summary_push)",
+        flush=True,
+    )
 
     high = sum(1 for e in events if e.get("severity") == "high")
     medium = sum(1 for e in events if e.get("severity") == "medium")
@@ -220,6 +229,7 @@ def generate_summary(date: str, log) -> dict:
 
     if not events:
         narrative = f"{date} 没有任何事件记录，监控系统全天平静。"
+        print("[summary_job] skip LLM (no events)", flush=True)
     else:
         try:
             prompt = USER_PROMPT_TPL.format(
@@ -227,9 +237,16 @@ def generate_summary(date: str, log) -> dict:
                 n_events=len(events),
                 events_block=_format_events_for_prompt(events),
             )
-            raw = _call_llm(
-                ollama["url"], used_model, prompt, int(ollama["timeout_sec"])
+            to = int(ollama["timeout_sec"])
+            print(
+                f"[summary_job] calling Ollama LLM model={used_model} "
+                f"timeout_sec={to} (wait…)",
+                flush=True,
             )
+            raw = _call_llm(
+                ollama["url"], used_model, prompt, to,
+            )
+            print("[summary_job] Ollama LLM returned, parsing JSON…", flush=True)
             parsed = _parse_llm_json(raw)
             if parsed:
                 hl_in = parsed.get("highlights") or []
@@ -260,6 +277,7 @@ def generate_summary(date: str, log) -> dict:
         "model": used_model,
     }
 
+    print("[summary_job] writing daily_summary to SQLite…", flush=True)
     conn = open_db(db_path)
     try:
         conn.execute(
@@ -292,9 +310,16 @@ def generate_summary(date: str, log) -> dict:
         "wrote summary date=%s total=%d high=%d medium=%d low=%d hl=%d",
         date, payload["total_events"], high, medium, low, len(highlights),
     )
+    print("[summary_job] SQLite write done.", flush=True)
 
-    if _feishu_enabled():
+    if feishu_on:
+        print("[summary_job] sending Feishu card…", flush=True)
         _push_to_feishu(payload, log)
+    else:
+        print(
+            "[summary_job] Feishu: skipped (set FEISHU_WEBHOOK or ai/feishu.yaml)",
+            flush=True,
+        )
 
     return payload
 
