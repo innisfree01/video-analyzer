@@ -40,9 +40,10 @@ All inference is local; no data leaves the AGX.
 curl -fsSL https://ollama.com/install.sh | sh
 sudo systemctl enable --now ollama
 
-# 2. Pull models (~10-15 min total, ~8 GB on disk)
-ollama pull qwen2.5vl:3b                   # VLM, ~3 GB
-ollama pull qwen2.5:7b-instruct-q4_K_M     # LLM, ~5 GB
+# 2. Pull models (VLM required; 7B LLM optional if you set llm_model to match vlm)
+ollama pull qwen2.5vl:3b                   # VLM + daily summary (text-only /api/chat), ~3 GB
+# Optional second model (only if llm_model differs in config.yaml):
+# ollama pull qwen2.5:7b-instruct-q4_K_M   # ~5 GB
 
 # 3. Storage on the NVMe SSD
 sudo mkdir -p /mnt/nova_ssd/events /mnt/nova_ssd/recordings /mnt/nova_ssd/ai_logs

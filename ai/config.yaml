@@ -26,7 +26,8 @@ storage:
 ollama:
   url: http://localhost:11434
   vlm_model: qwen2.5vl:3b
-  llm_model: qwen2.5:7b-instruct-q4_K_M
+  # Daily summary uses /api/chat text-only; same VL model is OK and saves ~5GB vs 7B LLM.
+  llm_model: qwen2.5vl:3b
   timeout_sec: 300
   vlm_poll_interval_sec: 2
   vlm_batch_size: 5
